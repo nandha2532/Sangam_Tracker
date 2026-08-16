@@ -1,0 +1,9 @@
+# Environment & Dependencies
+venv/
+__pycache__/
+*.pyc
+
+# Local secrets & Database scripts with credentials
+.streamlit/secrets.toml
+db_setup.py
+db_*.py
