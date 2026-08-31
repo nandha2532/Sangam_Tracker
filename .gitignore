@@ -7,3 +7,5 @@ __pycache__/
 .streamlit/secrets.toml
 db_setup.py
 db_*.py
+
+#postgresql://postgres:Nandha191099@db.nucyidbopzoovjdtrcyi.supabase.co:5432/postgres
