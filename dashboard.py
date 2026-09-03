@@ -141,8 +141,11 @@ def render_dashboard(members_df, member_dict, global_target_date):
                     st.error("Loan amount must be greater than 0.")
                 else:
                     m_id = member_dict[selected_member]
+                    
+                    # True principal is calculated to find the base EMI, 
+                    # but the FULL loan_amt leaves the treasury.
                     true_principal = loan_amt - part_pay
-                    emi_expected = true_principal / duration_m
+                    base_emi_expected = true_principal / duration_m
                     
                     # 1. Insert Loan into database
                     loan_data = {
@@ -157,15 +160,19 @@ def render_dashboard(members_df, member_dict, global_target_date):
                     if res.data:
                         new_loan_id = res.data[0]['id']
                         
-                        # 2. Generate the EMI Schedule Automatically
+                        # 2. Generate the EMI Schedule (Stacking part_pay onto Month 1)
                         emis = []
                         for i in range(1, int(duration_m) + 1):
                             next_date = (pd.to_datetime(first_emi_date) + pd.DateOffset(months=i-1)).strftime('%Y-%m-%d')
+                            
+                            # Month 1 gets the Part Payment added to it
+                            current_month_expected = (base_emi_expected + part_pay) if i == 1 else base_emi_expected
+                            
                             emis.append({
                                 "loan_id": new_loan_id,
                                 "member_id": m_id,
                                 "emi_number": i,
-                                "total_expected": emi_expected,
+                                "total_expected": current_month_expected,
                                 "pay_date": next_date,
                                 "status": "Pending",
                                 "paid_cash": 0.0,
@@ -173,19 +180,17 @@ def render_dashboard(members_df, member_dict, global_target_date):
                             })
                         supabase.table("emi_ledger").insert(emis).execute()
                         
-                        # 3. Auto-Deduct from Treasury Balance
-                        # We log this as a negative cash receipt so it perfectly reduces your "Available to Lend" balance
+                        # 3. Auto-Deduct FULL AMOUNT from Treasury Balance
                         supabase.table("payment_receipts").insert({
                             "member_id": m_id,
                             "payment_type": f"Loan Disbursement (Loan #{new_loan_id})",
-                            "amount_cash": -true_principal, 
+                            "amount_cash": -loan_amt, # <-- Fixed: Full amount leaves the Sangam
                             "amount_online": 0,
                             "logged_at": global_target_date.strftime('%Y-%m-%d')
                         }).execute()
                         
                         st.success(f"✅ Loan #{new_loan_id} successfully issued to {selected_member}!")
                         
-                        # Clear cache and refresh to update all dashboard numbers instantly
                         from database import clear_db_cache
                         clear_db_cache()
                         st.rerun()
@@ -236,26 +241,29 @@ def render_dashboard(members_df, member_dict, global_target_date):
             paid = float(row.get('paid_cash', 0)) + float(row.get('paid_online', 0))
             outstanding_emis += (expected - paid)
             
-        # Calculate Total Outstanding Principal (Accounting for Part Payments)
+        # Calculate Total Outstanding Principal 
         for _, loan in loans_df.iterrows():
             l_id = loan['id']
             
-            # 1. Get raw amounts
             total_amt = float(loan['total_amount'])
             part_payment = float(loan.get('part_payment_initial', 0.0))
             
-            # 2. Find the TRUE principal that was distributed into EMIs
             true_principal = total_amt - part_payment
-            
-            # 3. Calculate how much principal is in each EMI
             duration = int(loan['duration_months']) if int(loan['duration_months']) > 0 else 1
             principal_per_month = true_principal / duration
             
-            # 4. Multiply by the number of unpaid EMIs
+            # Find all unpaid EMIs for this specific loan
             unpaid_emis_for_loan = emis_df[(emis_df['loan_id'] == l_id) & (emis_df['status'] != 'Paid')]
             unpaid_count = len(unpaid_emis_for_loan)
             
-            total_outstanding_principal += (principal_per_month * unpaid_count)
+            # Calculate base remaining principal
+            loan_outstanding_principal = (principal_per_month * unpaid_count)
+            
+            # If EMI #1 is still pending/unpaid, the part payment is still outstanding!
+            if 1 in unpaid_emis_for_loan['emi_number'].values:
+                loan_outstanding_principal += part_payment
+                
+            total_outstanding_principal += loan_outstanding_principal
                 
     gc1, gc2, gc3 = st.columns(3)
     gc1.metric("Total Outstanding Principal", f"₹{total_outstanding_principal:,.0f}")

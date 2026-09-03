@@ -22,6 +22,27 @@ def render_collection_desk(members_df, member_dict, global_target_date):
     
     st.info(f"🗓️ Currently viewing and logging data for: **{selected_month_name} {target_year}** (Set via Sidebar)")
     
+    # ==========================================
+    # 🏦 TREASURY SUMMARY (GRAND TOTALS)
+    # ==========================================
+    st.divider()
+    st.markdown(f"### 🏦 Treasury Summary ({selected_month_name} {target_year})")
+    
+    if not receipts_df.empty:
+        monthly_receipts = receipts_df[(receipts_df['logged_at'].dt.month == target_month) & 
+                                       (receipts_df['logged_at'].dt.year == target_year)]
+                                       
+        global_cash = monthly_receipts['amount_cash'].sum()
+        global_online = monthly_receipts['amount_online'].sum()
+        global_total = global_cash + global_online
+        
+        v1, v2, v3 = st.columns(3)
+        v1.metric("💵 Total Cash in Hand", f"₹{global_cash:,.0f}")
+        v2.metric("📱 Total Bank Balance", f"₹{global_online:,.0f}")
+        v3.metric("🎯 Monthly Grand Total", f"₹{global_total:,.0f}")
+    else:
+        st.info("No payments have been logged yet.")
+
     # --- QUICK FILTERS ---
     st.markdown("### 🔎 Quick Filters")
     show_pending_only = st.checkbox("Hide fully paid members", value=False)
@@ -309,27 +330,7 @@ def render_collection_desk(members_df, member_dict, global_target_date):
                 st.toast("✅ Meeting Day Ledgers & Receipts Updated!", icon="🎉")
                 st.rerun()
 
-    # ==========================================
-    # 🏦 TREASURY SUMMARY (GRAND TOTALS)
-    # ==========================================
-    st.divider()
-    st.markdown(f"### 🏦 Treasury Summary ({selected_month_name} {target_year})")
     
-    if not receipts_df.empty:
-        monthly_receipts = receipts_df[(receipts_df['logged_at'].dt.month == target_month) & 
-                                       (receipts_df['logged_at'].dt.year == target_year)]
-                                       
-        global_cash = monthly_receipts['amount_cash'].sum()
-        global_online = monthly_receipts['amount_online'].sum()
-        global_total = global_cash + global_online
-        
-        v1, v2, v3 = st.columns(3)
-        v1.metric("💵 Total Cash in Hand", f"₹{global_cash:,.0f}")
-        v2.metric("📱 Total Bank Balance", f"₹{global_online:,.0f}")
-        v3.metric("🎯 Monthly Grand Total", f"₹{global_total:,.0f}")
-    else:
-        st.info("No payments have been logged yet.")
-
     # ==========================================
     # TRANSACTION AUDIT VIEWER & REVERSALS
     # ==========================================
