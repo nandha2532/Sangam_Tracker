@@ -6,23 +6,28 @@ import calendar
 from database import supabase, fetch_table, clear_db_cache
 from calculations import generate_emi_schedule
 
-def render_dashboard(members_df, member_dict):
-    st.markdown("<h1 style='color:#2c3e50;'>Sangam Daily Operations</h1>", unsafe_allow_html=True)
-    
+def render_dashboard(members_df, member_dict, global_target_date):
+    st.markdown("<h1 style='color:#34D399;'>📱 Sangam Daily Operations</h1>", unsafe_allow_html=True)    
     savings = fetch_table("savings_log")
     loans = fetch_table("loans")
     emis_all = fetch_table("emi_ledger")
     
     total_savings = float(savings['amount'].sum()) if not savings.empty else 0
     total_loans_given = float(loans['total_amount'].sum()) if not loans.empty else 0
-    pending_emis = emis_all[emis_all['status'] == 'Pending'] if not emis_all.empty else pd.DataFrame()
-    pending_total = float(pending_emis['total_expected'].sum()) if not pending_emis.empty else 0
+    pending_emis = emis_all[emis_all['status'].isin(['Pending', 'Partial'])] if not emis_all.empty else pd.DataFrame()
     
-    # 1. TOP METRICS (Fixed: Removed decimals)
+    # Calculate true pending total by subtracting what's already paid
+    pending_total = 0
+    if not pending_emis.empty:
+        total_exp = float(pending_emis['total_expected'].sum())
+        total_pd = float(pending_emis['paid_cash'].sum() + pending_emis['paid_online'].sum())
+        pending_total = total_exp - total_pd
+    
+    # 1. TOP METRICS 
     c1, c2, c3 = st.columns(3)
     c1.markdown(f"<div class='card card-green'><div class='card-title'>Total Pool Collected</div><div class='card-value'>₹{total_savings:,.0f}</div></div>", unsafe_allow_html=True)
     c2.markdown(f"<div class='card card-purple'><div class='card-title'>Total Disbursed</div><div class='card-value'>₹{total_loans_given:,.0f}</div></div>", unsafe_allow_html=True)
-    c3.markdown(f"<div class='card card-red'><div class='card-title'>Outstanding EMIs</div><div class='card-value'>₹{pending_total:,.0f}</div></div>", unsafe_allow_html=True)
+    c3.markdown(f"<div class='card card-red'><div class='card-title'>Outstanding EMIs (All Time)</div><div class='card-value'>₹{pending_total:,.0f}</div></div>", unsafe_allow_html=True)
 
     # 2. ACTION HUB
     st.markdown("<div class='section-header'>⚡ Quick Actions Hub</div>", unsafe_allow_html=True)
@@ -33,7 +38,6 @@ def render_dashboard(members_df, member_dict):
                 col_a, col_b = st.columns(2)
                 l_member = col_a.selectbox("Recipient", list(member_dict.keys()))
                 
-                # FIXED: Force integer bounds
                 l_amount = col_b.number_input("Total Loan Amount (₹)", min_value=1000, step=500)
                 l_part = col_a.number_input("Initial Part-Payment (₹)", min_value=0, max_value=int(l_amount), step=100)
                 l_dur = col_b.number_input("Duration (Months)", min_value=1, value=5, step=1)
@@ -58,66 +62,57 @@ def render_dashboard(members_df, member_dict):
                         st.toast("✅ Loan processed and EMI matrix generated!", icon="🎉")
                         st.rerun()
 
-    # 3. MONTHLY EMI MATRIX & PAYMENT HUB
+    # 3. MONTHLY EMI MATRIX (Executive Viewer)
     st.markdown("<br><div class='section-header'>📅 Monthly EMI Matrix</div>", unsafe_allow_html=True)
     
     if not emis_all.empty:
         emis_all['pay_date'] = pd.to_datetime(emis_all['pay_date'])
-        today = datetime.today().date()
         
-        col_y, col_m = st.columns(2)
-        available_years = sorted(emis_all['pay_date'].dt.year.dropna().unique().tolist())
-        current_year = today.year if today.year in available_years else (available_years[-1] if available_years else today.year)
-        selected_year = col_y.selectbox("Filter by Year", available_years, index=available_years.index(current_year) if current_year in available_years else 0)
+        # --- GLOBAL CALENDAR SYNC ---
+        selected_year = global_target_date.year
+        selected_month = global_target_date.month
+        selected_month_name = calendar.month_name[selected_month]
         
-        months_in_year = sorted(emis_all[emis_all['pay_date'].dt.year == selected_year]['pay_date'].dt.month.dropna().unique().tolist())
-        current_month = today.month if today.month in months_in_year else (months_in_year[0] if months_in_year else today.month)
+        # st.info(f"🗓️ Viewing EMIs scheduled for: **{selected_month_name} {selected_year}** (Synced with Sidebar)")
         
-        month_labels = [calendar.month_name[int(m)] for m in months_in_year]
-        selected_month_name = col_m.selectbox("Filter by Month", month_labels, index=months_in_year.index(current_month) if current_month in months_in_year else 0)
-        selected_month = list(calendar.month_name).index(selected_month_name)
-        
-        matrix_df = emis_all[(emis_all['pay_date'].dt.year == selected_year) & (emis_all['pay_date'].dt.month == selected_month)]
+        matrix_df = emis_all[(emis_all['pay_date'].dt.year == selected_year) & (emis_all['pay_date'].dt.month == selected_month)].copy()
         
         if not matrix_df.empty:
             matrix_df = pd.merge(matrix_df, members_df[['id', 'name']], left_on='member_id', right_on='id', how='left')
             
-            display_matrix = matrix_df[['emi_number', 'name', 'principal_due', 'interest_due', 'total_expected', 'status', 'id_x']]
-            display_matrix.columns = ['CURRENT EMI', 'NAME', 'PRINCIPAL', 'INTEREST', 'TOTAL', 'Status', 'emi_id']
-            display_matrix = display_matrix.sort_values(by='CURRENT EMI', ascending=False)
+            # Compute actual paid vs balance
+            matrix_df['paid_cash'] = matrix_df['paid_cash'].fillna(0).astype(float)
+            matrix_df['paid_online'] = matrix_df['paid_online'].fillna(0).astype(float)
+            matrix_df['TOTAL PAID'] = matrix_df['paid_cash'] + matrix_df['paid_online']
+            matrix_df['BALANCE'] = matrix_df['total_expected'].astype(float) - matrix_df['TOTAL PAID']
             
-            # --- NEW FEATURE: DYNAMIC MONTHLY TOTALS ---
-            collected_total = display_matrix[display_matrix['Status'] == 'Paid']['TOTAL'].sum()
-            expected_total = display_matrix['TOTAL'].sum()
+            display_matrix = matrix_df[['emi_number', 'name', 'total_expected', 'TOTAL PAID', 'BALANCE', 'status']]
+            display_matrix.columns = ['EMI NO.', 'NAME', 'EXPECTED', 'PAID', 'BALANCE DUE', 'STATUS']
+            display_matrix = display_matrix.sort_values(by='EMI NO.', ascending=False)
+            
+            collected_total = display_matrix['PAID'].sum()
+            expected_total = display_matrix['EXPECTED'].sum()
+            remaining_total = display_matrix['BALANCE DUE'].sum()
             
             st.markdown("<br>", unsafe_allow_html=True)
-            m1, m2, _ = st.columns([1, 1, 2])
-            m1.metric("✅ Total Collected", f"₹{collected_total:,.0f}")
-            m2.metric("🎯 Total Expected", f"₹{expected_total:,.0f}")
+            m1, m2, m3 = st.columns([1, 1, 1])
+            m1.metric("🎯 Total Expected", f"₹{expected_total:,.0f}")
+            m2.metric("✅ Total Collected", f"₹{collected_total:,.0f}")
+            m3.metric("⏳ Total Remaining", f"₹{remaining_total:,.0f}")
             st.markdown("<br>", unsafe_allow_html=True)
-            # -------------------------------------------
             
+            # Dynamic styling for Paid (Green) and Partial (Yellow)
             def style_excel(row):
-                if row['Status'] == 'Paid':
-                    return ['background-color: #d1f2eb; color: #145a32'] * len(row)
+                if row['STATUS'] == 'Paid':
+                    return ['background-color: #18201D; color: #22C55E; font-weight: bold'] * len(row)
+                elif row['STATUS'] == 'Partial':
+                    return ['background-color: #121817; color: #F59E0B'] * len(row) # Pending Color
                 return [''] * len(row)
                 
-            format_matrix = {'PRINCIPAL': '₹{:,.0f}', 'INTEREST': '₹{:,.0f}', 'TOTAL': '₹{:,.0f}'}
-            st.dataframe(display_matrix[['CURRENT EMI', 'NAME', 'PRINCIPAL', 'INTEREST', 'TOTAL', 'Status']].style.format(format_matrix).apply(style_excel, axis=1), hide_index=True, use_container_width=True)
+            format_matrix = {'EXPECTED': '₹{:,.0f}', 'PAID': '₹{:,.0f}', 'BALANCE DUE': '₹{:,.0f}'}
+            st.dataframe(display_matrix.style.format(format_matrix).apply(style_excel, axis=1), hide_index=True, use_container_width=True)
             
-            st.markdown("<br><div class='section-header'>✔️ Process Pending EMIs</div>", unsafe_allow_html=True)
-            pending_this_month = display_matrix[display_matrix['Status'] == 'Pending']
-            
-            if not pending_this_month.empty:
-                for _, row in pending_this_month.iterrows():
-                    with st.form(f"pay_emi_{row['emi_id']}"):
-                        st.write(f"**{row['NAME']}** | EMI {row['CURRENT EMI']} | Due: ₹{row['TOTAL']:,.0f}")
-                        if st.form_submit_button("Mark as Paid"):
-                            supabase.table("emi_ledger").update({"status": 'Paid'}).eq("id", int(row['emi_id'])).execute()
-                            clear_db_cache()
-                            st.rerun()
-            else:
-                st.success(f"All EMIs for {selected_month_name} {selected_year} have been cleared! 🎉")
+            st.caption("ℹ️ Note: Payments must be logged through the **Collection Desk** to ensure accurate cash/online audit tracking.")
         else:
             st.info(f"No EMIs scheduled for {selected_month_name} {selected_year}.")
     else:

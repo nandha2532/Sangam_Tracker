@@ -28,8 +28,8 @@ def calculate_sub_loan_month(amount_taken, duration_months, start_date_str, targ
         "total_due": monthly_principal + interest
     }
 
-def render_settlement(members_df, member_dict):
-    st.markdown("<h1 style='color:#2c3e50;'>🤝 Settlement & Shadow Ledger</h1>", unsafe_allow_html=True)
+def render_settlement(members_df, member_dict, global_target_date):
+    st.markdown("<h1 style='color:#34D399;'>🤝 Settlement & Shadow Ledger</h1>", unsafe_allow_html=True)
     st.write("Track pass-through liabilities and calculate exact 'Bring to Meeting' cash totals.")
     
     loans_df = fetch_table("loans")
@@ -126,19 +126,15 @@ def render_settlement(members_df, member_dict):
     # ==========================================
     st.markdown("<br><div class='section-header'>📊 Individual Settlement Statement</div>", unsafe_allow_html=True)
     
-    col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
-    today = datetime.today().date()
-    
-    available_years = [today.year, today.year + 1] if emis_df.empty else sorted(pd.to_datetime(emis_df['pay_date']).dt.year.dropna().unique().tolist())
-    selected_year = col_f1.selectbox("Year", available_years, index=available_years.index(today.year) if today.year in available_years else 0)
-    
-    month_names = list(calendar.month_name)[1:]
-    selected_month_name = col_f2.selectbox("Month", month_names, index=today.month - 1)
-    selected_month = month_names.index(selected_month_name) + 1
-    
+    # --- GLOBAL CALENDAR SYNC ---
+    selected_year = global_target_date.year
+    selected_month = global_target_date.month
+    selected_month_name = calendar.month_name[selected_month]
     target_date = datetime(selected_year, selected_month, 15).date()
     
-    selected_member_names = col_f3.multiselect(
+    # st.info(f"🗓️ Generating Shadow Ledger for: **{selected_month_name} {selected_year}** (Synced with Sidebar)")
+    
+    selected_member_names = st.multiselect(
         "Target Member(s) [Select multiple to combine aliases]", 
         options=list(member_dict.keys())
     )
@@ -148,7 +144,6 @@ def render_settlement(members_df, member_dict):
         return
 
     selected_member_ids = [member_dict[name] for name in selected_member_names]
-    
     st.divider()
     
     # ------------------------------------------
