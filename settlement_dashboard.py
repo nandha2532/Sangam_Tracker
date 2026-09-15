@@ -132,8 +132,6 @@ def render_settlement(members_df, member_dict, global_target_date):
     selected_month_name = calendar.month_name[selected_month]
     target_date = datetime(selected_year, selected_month, 15).date()
     
-    # st.info(f"🗓️ Generating Shadow Ledger for: **{selected_month_name} {selected_year}** (Synced with Sidebar)")
-    
     selected_member_names = st.multiselect(
         "Target Member(s) [Select multiple to combine aliases]", 
         options=list(member_dict.keys())
@@ -147,11 +145,17 @@ def render_settlement(members_df, member_dict, global_target_date):
     st.divider()
     
     # ------------------------------------------
-    # TABLE A: LIABILITIES
+    # PRE-CALCULATE ALL DATA FOR KPIs AND TABLES
     # ------------------------------------------
-    st.subheader(f"🔴 Accounts Payable: What must be BROUGHT to the meeting")
-    payables_data = []
+    direct_payables_data = []
+    subloan_payables_data = []
+    receivables_data = []
     
+    total_direct_liability = 0.0
+    total_sub_loans_payable = 0.0
+    total_sub_loans_receivable = 0.0
+    
+    # 1. Calculate Payables (Direct Loans)
     if not emis_df.empty:
         emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'])
         direct_emis = emis_df[(emis_df['member_id'].isin(selected_member_ids)) & 
@@ -160,15 +164,19 @@ def render_settlement(members_df, member_dict, global_target_date):
                               
         for _, row in direct_emis.iterrows():
             exact_ticket_name = id_to_name.get(row['member_id'], 'Unknown')
-            payables_data.append({
+            total_expected = float(row['total_expected'])
+            total_direct_liability += total_expected
+            
+            direct_payables_data.append({
                 "Source": f"Direct Loan #{row['loan_id']}",
                 "Belongs To": exact_ticket_name,
                 "EMI No.": int(row['emi_number']),
                 "Principal": float(row['principal_due']),
                 "Interest": float(row['interest_due']),
-                "Total To Pay": float(row['total_expected'])
+                "Total To Pay": total_expected
             })
             
+    # 2. Calculate Payables (Sub-Loans Taken)
     if not settlements_df.empty:
         my_sub_loans = settlements_df[settlements_df['sub_borrower_id'].isin(selected_member_ids)]
         for _, sub in my_sub_loans.iterrows():
@@ -184,39 +192,19 @@ def render_settlement(members_df, member_dict, global_target_date):
             )
             
             if calc:
-                payables_data.append({
+                total_due = float(calc['total_due'])
+                total_sub_loans_payable += total_due
+                
+                subloan_payables_data.append({
                     "Source": f"Sub-Loan from {master_owner_name}",
                     "Belongs To": exact_borrower_name,
                     "EMI No.": calc['emi_number'],
                     "Principal": calc['principal_due'],
                     "Interest": calc['interest_due'],
-                    "Total To Pay": calc['total_due']
+                    "Total To Pay": total_due
                 })
                 
-    if payables_data:
-        df_payables = pd.DataFrame(payables_data)
-        total_bring_cash = df_payables['Total To Pay'].sum()
-        
-        df_payables.loc['FINAL TOTAL'] = ["", "BRING TO MEETING", "", df_payables['Principal'].sum(), df_payables['Interest'].sum(), total_bring_cash]
-        
-        format_dict = {'Principal': '₹{:,.0f}', 'Interest': '₹{:,.0f}', 'Total To Pay': '₹{:,.0f}'}
-        
-        def highlight_total(s):
-            if s.name == 'FINAL TOTAL': return ['background-color: #fef9e7; font-weight: bold; color: #b7950b'] * len(s)
-            return [''] * len(s)
-            
-        st.dataframe(df_payables.style.format(format_dict).apply(highlight_total, axis=1), hide_index=True, use_container_width=True)
-    else:
-        st.success(f"✅ Selected members have no liabilities due for {selected_month_name} {selected_year}.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # ------------------------------------------
-    # TABLE B: RECEIVABLES
-    # ------------------------------------------
-    st.subheader(f"🟢 Accounts Receivable: What must be COLLECTED before the meeting")
-    receivables_data = []
-    
+    # 3. Calculate Receivables (Sub-Loans Given)
     if not settlements_df.empty:
         my_master_loans = loans_df[loans_df['target_member_id'].isin(selected_member_ids)]['id'].tolist()
         lent_out = settlements_df[settlements_df['master_loan_id'].isin(my_master_loans)]
@@ -234,18 +222,92 @@ def render_settlement(members_df, member_dict, global_target_date):
             )
             
             if calc:
+                amount_to_collect = float(calc['total_due'])
+                total_sub_loans_receivable += amount_to_collect
+                
                 receivables_data.append({
                     "Sub-Lent To": sub_borrower_name,
                     "Originating Loan": f"Direct Loan #{lent['master_loan_id']} ({exact_originating_name})",
                     "EMI No.": calc['emi_number'],
                     "Principal": calc['principal_due'],
                     "Interest": calc['interest_due'],
-                    "Amount to Collect": calc['total_due']
+                    "Amount to Collect": amount_to_collect
                 })
-                
+
+    # --- RENDER 4-PART KPI ROW ---
+    # Net logic: (What you owe directly - What others are paying you for it) + What you owe others
+    net_total_payable = (total_direct_liability - total_sub_loans_receivable) + total_sub_loans_payable
+    
+    st.markdown("### 💼 Financial Overview")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("1️⃣ Direct Loan Liability", f"₹{total_direct_liability:,.0f}")
+    kpi2.metric("2️⃣ Total Net (Bring to Meeting)", f"₹{net_total_payable:,.0f}")
+    kpi3.metric("3️⃣ Sub-Loans Payable (Owed to Others)", f"₹{total_sub_loans_payable:,.0f}")
+    kpi4.metric("4️⃣ Sub-Loans Receivable (Collect from Others)", f"₹{total_sub_loans_receivable:,.0f}")
+    
+    st.divider()
+    
+    # ------------------------------------------
+    # TABLE A1: LIABILITIES (DIRECT LOANS)
+    # ------------------------------------------
+    st.subheader(f"🔴 Accounts Payable: Direct Loans")
+    
+    format_dict = {'Principal': '₹{:,.0f}', 'Interest': '₹{:,.0f}', 'Total To Pay': '₹{:,.0f}'}
+    
+    if direct_payables_data:
+        df_direct = pd.DataFrame(direct_payables_data)
+        total_direct_cash = df_direct['Total To Pay'].sum()
+        
+        df_direct.loc['FINAL TOTAL'] = ["", "DIRECT LOAN TOTAL", "", df_direct['Principal'].sum(), df_direct['Interest'].sum(), total_direct_cash]
+        
+        def highlight_total_direct(s):
+            if s.name == 'FINAL TOTAL': return ['background-color: #fef9e7; font-weight: bold; color: #b7950b'] * len(s)
+            return [''] * len(s)
+            
+        st.dataframe(df_direct.style.format(format_dict).apply(highlight_total_direct, axis=1), hide_index=True, use_container_width=True)
+    else:
+        st.success(f"✅ Selected members have no direct liabilities due for {selected_month_name} {selected_year}.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ------------------------------------------
+    # TABLE A2: LIABILITIES (SUB-LOANS)
+    # ------------------------------------------
+    st.subheader(f"🟠 Accounts Payable: Sub-Loans (Owed to Others)")
+    
+    if subloan_payables_data:
+        df_sub = pd.DataFrame(subloan_payables_data)
+        total_sub_cash = df_sub['Total To Pay'].sum()
+        
+        df_sub.loc['FINAL TOTAL'] = ["", "SUB-LOAN TOTAL", "", df_sub['Principal'].sum(), df_sub['Interest'].sum(), total_sub_cash]
+        
+        def highlight_total_sub(s):
+            if s.name == 'FINAL TOTAL': return ['background-color: #fef9e7; font-weight: bold; color: #d35400'] * len(s)
+            return [''] * len(s)
+            
+        st.dataframe(df_sub.style.format(format_dict).apply(highlight_total_sub, axis=1), hide_index=True, use_container_width=True)
+    else:
+        st.info("No sub-loan liabilities owed to others this month.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # ------------------------------------------
+    # TABLE B: RECEIVABLES
+    # ------------------------------------------
+    st.subheader(f"🟢 Accounts Receivable: What must be COLLECTED before the meeting")
+    
     if receivables_data:
         df_receivables = pd.DataFrame(receivables_data)
+        
+        total_collect_cash = df_receivables['Amount to Collect'].sum()
+        df_receivables.loc['FINAL TOTAL'] = ["", "TOTAL TO COLLECT", "", df_receivables['Principal'].sum(), df_receivables['Interest'].sum(), total_collect_cash]
+        
         format_dict_rec = {'Principal': '₹{:,.0f}', 'Interest': '₹{:,.0f}', 'Amount to Collect': '₹{:,.0f}'}
-        st.dataframe(df_receivables.style.format(format_dict_rec), hide_index=True, use_container_width=True)
+        
+        def highlight_total_rec(s):
+            if s.name == 'FINAL TOTAL': return ['background-color: #e8f8f5; font-weight: bold; color: #117a65'] * len(s)
+            return [''] * len(s)
+            
+        st.dataframe(df_receivables.style.format(format_dict_rec).apply(highlight_total_rec, axis=1), hide_index=True, use_container_width=True)
     else:
         st.info("No sub-loans to collect this month.")

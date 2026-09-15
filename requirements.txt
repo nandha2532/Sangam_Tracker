@@ -3,3 +3,4 @@ pandas
 supabase
 plotly
 numpy
+streamlit-cookies-controller

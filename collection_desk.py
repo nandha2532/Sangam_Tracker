@@ -114,10 +114,23 @@ def render_collection_desk(members_df, member_dict, global_target_date):
     df_sav = pd.DataFrame(meeting_data_sav)
     df_emi = pd.DataFrame(meeting_data_emi)
     
-    def highlight_paid(row):
+    # Set "Name" as the Index so it becomes a Frozen/Sticky column on the left
+    if not df_sav.empty: df_sav.set_index("Name", inplace=True)
+    if not df_emi.empty: df_emi.set_index("Name", inplace=True)
+    
+    # ==========================================
+    # VISUAL STYLING: EXCEL-LIKE GRID LINES
+    # ==========================================
+    def apply_excel_grid(row):
+        # 1. Base style: Apply a visible border and a slightly lighter background to every cell
+        base_style = 'border: 1px solid #4B5563; background-color: #121817;'
+        
+        # 2. If fully paid, override with the green text and dark background
         if row['Remaining Due'] <= 0:
-            return ['background-color: #18201D; color: #22C55E; font-weight: bold'] * len(row)
-        return [''] * len(row)
+            return ['border: 1px solid #4B5563; background-color: #0B0F0E; color: #22C55E; font-weight: bold'] * len(row)
+            
+        # 3. Apply the base grid style to all other rows
+        return [base_style] * len(row)
 
     # Global Validation Flag
     validation_failed = False
@@ -129,10 +142,10 @@ def render_collection_desk(members_df, member_dict, global_target_date):
     
     edited_sav = pd.DataFrame()
     if not df_sav.empty:
-        styled_sav = df_sav.style.apply(highlight_paid, axis=1)
+        styled_sav = df_sav.style.apply(apply_excel_grid, axis=1)
         edited_sav = st.data_editor(
             styled_sav,
-            disabled=["Member_ID", "Name", "Expected", "Already Paid", "Remaining Due"],
+            disabled=["Member_ID", "Expected", "Already Paid", "Remaining Due"],
             column_config={
                 "Member_ID": None, 
                 "Expected": st.column_config.NumberColumn(format="₹%d"),
@@ -143,12 +156,13 @@ def render_collection_desk(members_df, member_dict, global_target_date):
                 "Custom Cash": st.column_config.NumberColumn("Custom Cash (₹)", format="₹%d", min_value=0),
                 "Custom Online": st.column_config.NumberColumn("Custom Bank (₹)", format="₹%d", min_value=0)
             },
-            use_container_width=True, hide_index=True, key="sav_editor"
+            use_container_width=True, 
+            hide_index=False, # Shows the sticky "Name" Index
+            key="sav_editor"
         )
         
-        # --- INSTANT VALIDATION ---
         sav_errors = []
-        for _, row in edited_sav.iterrows():
+        for member_name, row in edited_sav.iterrows():
             is_full_cash = row.get('Full Cash (₹500)', False)
             is_full_online = row.get('Full Online (₹500)', False)
             cust_cash = float(row.get('Custom Cash', 0.0))
@@ -156,18 +170,17 @@ def render_collection_desk(members_df, member_dict, global_target_date):
             
             if is_full_cash or is_full_online or cust_cash > 0 or cust_online > 0:
                 if is_full_cash and is_full_online:
-                    sav_errors.append(f"❌ **{row['Name']}**: Both 'Full Cash' and 'Full Bank' are checked. For split payments, leave checkboxes empty and use the Custom columns.")
+                    sav_errors.append(f"❌ **{member_name}**: Both 'Full Cash' and 'Full Bank' are checked.")
                     validation_failed = True
                 elif (is_full_cash or is_full_online) and (cust_cash > 0 or cust_online > 0):
-                    sav_errors.append(f"❌ **{row['Name']}**: Do not mix checkboxes with custom amounts. Use EITHER the checkboxes OR the Custom columns.")
+                    sav_errors.append(f"❌ **{member_name}**: Do not mix checkboxes with custom amounts.")
                     validation_failed = True
                 elif (cust_cash + cust_online) > 500.0:
-                    sav_errors.append(f"❌ **{row['Name']}**: Custom savings total entered is ₹{cust_cash + cust_online}. The maximum allowed is ₹500.")
+                    sav_errors.append(f"❌ **{member_name}**: Custom total entered is ₹{cust_cash + cust_online}. Max is ₹500.")
                     validation_failed = True
 
         if sav_errors:
-            for err in sav_errors:
-                st.error(err)
+            for err in sav_errors: st.error(err)
     else:
         st.success("All visible Savings dues are clear!")
 
@@ -177,10 +190,10 @@ def render_collection_desk(members_df, member_dict, global_target_date):
     st.markdown("### 🔵 2. Loan EMI Collection")
     edited_emi = pd.DataFrame()
     if not df_emi.empty:
-        styled_emi = df_emi.style.apply(highlight_paid, axis=1)
+        styled_emi = df_emi.style.apply(apply_excel_grid, axis=1)
         edited_emi = st.data_editor(
             styled_emi,
-            disabled=["Member_ID", "Name", "Expected", "Already Paid", "Remaining Due"],
+            disabled=["Member_ID", "Expected", "Already Paid", "Remaining Due"],
             column_config={
                 "Member_ID": None, 
                 "Expected": st.column_config.NumberColumn(format="₹%d"),
@@ -189,7 +202,9 @@ def render_collection_desk(members_df, member_dict, global_target_date):
                 "New Cash": st.column_config.NumberColumn("Cash Paid (₹)", format="₹%d", min_value=0),
                 "New Online": st.column_config.NumberColumn("Bank Paid (₹)", format="₹%d", min_value=0)
             },
-            use_container_width=True, hide_index=True, key="emi_editor"
+            use_container_width=True, 
+            hide_index=False, # Shows the sticky "Name" Index
+            key="emi_editor"
         )
     else:
         st.success("All visible EMI dues are clear!")
@@ -199,7 +214,7 @@ def render_collection_desk(members_df, member_dict, global_target_date):
     # ==========================================
     to_commit_sav_list = []
     if not edited_sav.empty and not validation_failed:
-        for _, row in edited_sav.iterrows():
+        for member_name, row in edited_sav.iterrows():
             is_full_cash = row.get('Full Cash (₹500)', False)
             is_full_online = row.get('Full Online (₹500)', False)
             cust_cash = float(row.get('Custom Cash', 0.0))
@@ -212,7 +227,7 @@ def render_collection_desk(members_df, member_dict, global_target_date):
 
     to_commit_emi_list = []
     if not edited_emi.empty and not validation_failed:
-        for _, row in edited_emi.iterrows():
+        for member_name, row in edited_emi.iterrows():
             if float(row.get('New Cash', 0.0)) > 0 or float(row.get('New Online', 0.0)) > 0:
                 to_commit_emi_list.append(row)
                 
@@ -245,10 +260,9 @@ def render_collection_desk(members_df, member_dict, global_target_date):
     st.markdown("### 💾 Finalize & Save Transactions")
     
     if validation_failed:
-        st.warning("⚠️ Please fix the errors in the tables above before saving. The save button is temporarily disabled.")
+        st.warning("⚠️ Please fix the errors in the tables above before saving.")
         
     if st.button(f"🔒 Lock Entered Payments for {target_log_date}", type="primary", disabled=validation_failed):
-        
         commits_made = False
         
         if to_commit_sav.empty and to_commit_emi.empty:
@@ -258,20 +272,19 @@ def render_collection_desk(members_df, member_dict, global_target_date):
             if not to_commit_sav.empty:
                 for _, row in to_commit_sav.iterrows():
                     m_id = int(row['Member_ID'])
-                    
                     cash = 500.0 if row['Full Cash (₹500)'] else float(row['Custom Cash'])
                     online = 500.0 if row['Full Online (₹500)'] else float(row['Custom Online'])
                     
                     if (cash + online) > 0:
                         supabase.table("savings_log").insert({
-                            "member_id": m_id,
-                            "amount": cash + online,
+                            "member_id": m_id, "amount": cash + online,
                             "payment_mode": "Split" if cash > 0 and online > 0 else ("Cash" if cash > 0 else "Online"),
                             "created_at": target_log_date
                         }).execute()
                         
                         supabase.table("payment_receipts").insert({
-                            "member_id": m_id, "payment_type": "Savings", "amount_cash": cash, "amount_online": online, "logged_at": target_log_date
+                            "member_id": m_id, "payment_type": "Savings", 
+                            "amount_cash": cash, "amount_online": online, "logged_at": target_log_date
                         }).execute()
                         commits_made = True
 
@@ -287,25 +300,20 @@ def render_collection_desk(members_df, member_dict, global_target_date):
                                           (emis_df['status'].isin(['Pending', 'Partial'])) & 
                                           (emis_df['pay_date'].dt.month <= target_month) &
                                           (emis_df['pay_date'].dt.year <= target_year)]
-                         
                          pending = pending.sort_values(by='pay_date')
                          
                          for idx, emi_row in pending.iterrows():
-                             if cash + online <= 0:
-                                 break
+                             if cash + online <= 0: break
                                  
                              emi_id = int(emi_row['id'])
                              expected = float(emi_row['total_expected'])
                              current_paid_cash = float(emi_row.get('paid_cash', 0))
                              current_paid_online = float(emi_row.get('paid_online', 0))
-                             
                              remaining_for_this_emi = expected - (current_paid_cash + current_paid_online)
                              
-                             if remaining_for_this_emi <= 0:
-                                 continue
+                             if remaining_for_this_emi <= 0: continue
                                  
                              payment_to_apply = min(remaining_for_this_emi, cash + online)
-                             
                              apply_cash = min(payment_to_apply, cash)
                              cash -= apply_cash
                              apply_online = payment_to_apply - apply_cash
@@ -330,7 +338,6 @@ def render_collection_desk(members_df, member_dict, global_target_date):
                 st.toast("✅ Meeting Day Ledgers & Receipts Updated!", icon="🎉")
                 st.rerun()
 
-    
     # ==========================================
     # TRANSACTION AUDIT VIEWER & REVERSALS
     # ==========================================
