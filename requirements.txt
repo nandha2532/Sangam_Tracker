@@ -4,3 +4,4 @@ supabase
 plotly
 numpy
 streamlit-cookies-controller
+streamlit-aggrid
