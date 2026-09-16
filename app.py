@@ -7,7 +7,6 @@ from auth import init_auth_state, render_login_page, logout
 from database import supabase, fetch_table, get_members, clear_db_cache
 from dashboard import render_dashboard
 from admin_configs import render_admin
-from settlement_dashboard import render_settlement
 from collection_desk import render_collection_desk
 
 st.set_page_config(page_title="Sangam Tracker", page_icon="🤝", layout="wide", initial_sidebar_state="expanded")
@@ -60,9 +59,6 @@ available_pages = ["📱 Actionable Dashboard"]
 if user_role in ["collector", "manager", "admin"]:
     available_pages.append("💰 Collection Desk")
 
-if user_role in ["manager", "admin"]:
-    available_pages.append("🤝 Individual Settlements")
-
 if user_role == "admin":
     available_pages.append("⚙️ Admin & Configs")
 
@@ -94,6 +90,3 @@ elif nav_selection == "💰 Collection Desk":
 
 elif nav_selection == "⚙️ Admin & Configs":
     render_admin(members_df)
-
-elif nav_selection == "🤝 Individual Settlements":
-    render_settlement(members_df, member_dict, global_target_date)

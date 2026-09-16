@@ -7,7 +7,16 @@ from calculations import generate_emi_schedule
 def render_admin(members_df):
     st.markdown("<h1 style='color:#34D399;'>⚙️ Admin & Configurations</h1>", unsafe_allow_html=True)
     
-    tab1, tab2, tab3 = st.tabs(["👥 Manage Members", "📜 Ledger View", "🧹 Danger Zone"])
+    # ADDED 4TH TAB FOR SUB-LOANS
+    tab1, tab2, tab3, tab4 = st.tabs(["👥 Manage Members", "📜 Ledger View", "🧹 Danger Zone", "🤝 Sub-Loans (Splits)"])
+    
+    # Internal mappings needed for the dropdowns
+    if not members_df.empty:
+        id_to_name = dict(zip(members_df['id'], members_df['name']))
+        member_dict = dict(zip(members_df['name'], members_df['id']))
+    else:
+        id_to_name = {}
+        member_dict = {}
     
     with tab1:
         st.subheader("Sangam Members & Priority Queue")
@@ -53,8 +62,6 @@ def render_admin(members_df):
         loans_df = fetch_table("loans")
         
         if not loans_df.empty and not members_df.empty:
-            id_to_name = dict(zip(members_df['id'], members_df['name']))
-            
             loan_options = []
             loan_mapping = {}
             for _, row in loans_df.iterrows():
@@ -117,3 +124,87 @@ def render_admin(members_df):
                         st.rerun()
         else:
             st.info("No active loans available to manage.")
+
+    with tab4:
+        st.markdown("### 📝 Log & Manage Sub-Loans (Unofficial Splits)")
+        st.write("Assign portions of a Master Loan to other members, or edit existing splits.")
+        
+        loans_df = fetch_table("loans")
+        settlements_df = fetch_table("individual_settlement")
+        
+        if loans_df.empty or members_df.empty:
+            st.warning("Please ensure active members and master loans exist before assigning sub-loans.")
+        else:
+            col_l1, col_l2 = st.columns(2)
+            
+            with col_l1:
+                with st.expander("➕ Assign funds from a Master Loan", expanded=True):
+                    with st.form("add_sub_loan_form"):
+                        active_loans = loans_df[loans_df['active_status'] == True]
+                        loan_options = []
+                        loan_mapping = {}
+                        for _, row in active_loans.iterrows():
+                            owner_name = id_to_name.get(row['target_member_id'], 'Unknown')
+                            label = f"Loan #{row['id']} - {owner_name} (₹{row['total_amount']:,.0f})"
+                            loan_options.append(label)
+                            loan_mapping[label] = int(row['id'])
+                            
+                        s_master = st.selectbox("Select Master Loan", loan_options)
+                        s_borrower = st.selectbox("Select Sub-Borrower", list(member_dict.keys()))
+                        s_amount = st.number_input("Amount Taken (₹)", min_value=100, step=500)
+                        
+                        if st.form_submit_button("💾 Lock Sub-Loan"):
+                            master_loan_id = loan_mapping[s_master]
+                            borrower_id = member_dict[s_borrower]
+                            
+                            supabase.table("individual_settlement").insert({
+                                "master_loan_id": master_loan_id,
+                                "sub_borrower_id": borrower_id,
+                                "amount_taken": float(s_amount)
+                            }).execute()
+                            
+                            clear_db_cache()
+                            st.toast(f"✅ Sub-loan of ₹{s_amount} assigned to {s_borrower}!", icon="🤝")
+                            st.rerun()
+
+            with col_l2:
+                with st.expander("⚙️ Manage Existing Splits", expanded=True):
+                    if not settlements_df.empty:
+                        split_options = []
+                        split_mapping = {}
+                        for _, row in settlements_df.iterrows():
+                            sub_name = id_to_name.get(row['sub_borrower_id'], 'Unknown')
+                            master_loan = loans_df[loans_df['id'] == row['master_loan_id']]
+                            if not master_loan.empty:
+                                master_name = id_to_name.get(master_loan.iloc[0]['target_member_id'], 'Unknown')
+                                label = f"Split #{row['id']} - {sub_name} took ₹{row['amount_taken']:,.0f} from {master_name}'s Loan"
+                            else:
+                                label = f"Split #{row['id']} - {sub_name} took ₹{row['amount_taken']:,.0f}"
+                                
+                            split_options.append(label)
+                            split_mapping[label] = int(row['id'])
+
+                        s_edit = st.selectbox("Select Split to Modify", ["-- Select --"] + split_options)
+
+                        if s_edit != "-- Select --":
+                            target_id = split_mapping[s_edit]
+                            target_row = settlements_df[settlements_df['id'] == target_id].iloc[0]
+
+                            with st.form("edit_split_form"):
+                                st.write("**Edit Split Amount**")
+                                new_amount = st.number_input("Amount Taken (₹)", min_value=100, step=500, value=int(target_row['amount_taken']))
+                                
+                                c_a, c_b = st.columns(2)
+                                if c_a.form_submit_button("💾 Update Amount"):
+                                    supabase.table("individual_settlement").update({"amount_taken": float(new_amount)}).eq("id", target_id).execute()
+                                    clear_db_cache()
+                                    st.toast(f"✅ Split updated successfully!", icon="💾")
+                                    st.rerun()
+                                    
+                                if c_b.form_submit_button("🗑️ Delete Split"):
+                                    supabase.table("individual_settlement").delete().eq("id", target_id).execute()
+                                    clear_db_cache()
+                                    st.toast("✅ Split removed permanently!", icon="🗑️")
+                                    st.rerun()
+                    else:
+                        st.info("No unofficial splits have been created yet.")

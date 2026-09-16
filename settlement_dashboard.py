@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
-import calendar
-from database import supabase, fetch_table, clear_db_cache
 
+# ==========================================
+# HELPER: SUB-LOAN CALCULATOR
+# ==========================================
 def calculate_sub_loan_month(amount_taken, duration_months, start_date_str, target_date):
     try:
         start_date = pd.to_datetime(start_date_str).date()
@@ -16,7 +16,7 @@ def calculate_sub_loan_month(amount_taken, duration_months, start_date_str, targ
         return None
         
     monthly_principal = amount_taken / duration_months
-    monthly_rate = 0.02
+    monthly_rate = 0.02 # 2% Common Interest
     
     current_outstanding = amount_taken - (monthly_principal * (month_index - 1))
     interest = current_outstanding * monthly_rate
@@ -28,286 +28,294 @@ def calculate_sub_loan_month(amount_taken, duration_months, start_date_str, targ
         "total_due": monthly_principal + interest
     }
 
-def render_settlement(members_df, member_dict, global_target_date):
-    st.markdown("<h1 style='color:#34D399;'>🤝 Settlement & Shadow Ledger</h1>", unsafe_allow_html=True)
-    st.write("Track pass-through liabilities and calculate exact 'Bring to Meeting' cash totals.")
-    
-    loans_df = fetch_table("loans")
-    settlements_df = fetch_table("individual_settlement")
-    emis_df = fetch_table("emi_ledger")
-    
-    if loans_df.empty or members_df.empty:
-        st.warning("Please ensure active members and loans exist before using the settlement ledger.")
-        return
+# ==========================================
+# ROW STYLING FUNCTIONS
+# ==========================================
+def style_payables(row):
+    # Colors row green if it is fully paid
+    if row.get('Remaining Due', 1) <= 0:
+        return ['background-color: #D1E7DD; color: #0F5132; font-weight: bold'] * len(row)
+    return [''] * len(row)
 
-    id_to_name = dict(zip(members_df['id'], members_df['name']))
-    
-    # ==========================================
-    # 1. THE SUB-LOAN ASSIGNER & MANAGER
-    # ==========================================
-    st.markdown("<div class='section-header'>📝 Log & Manage Sub-Loans (Unofficial Splits)</div>", unsafe_allow_html=True)
-    
-    col_l1, col_l2 = st.columns(2)
-    
-    with col_l1:
-        with st.expander("➕ Assign funds from a Master Loan", expanded=False):
-            with st.form("add_sub_loan_form"):
-                active_loans = loans_df[loans_df['active_status'] == True]
-                loan_options = []
-                loan_mapping = {}
-                for _, row in active_loans.iterrows():
-                    owner_name = id_to_name.get(row['target_member_id'], 'Unknown')
-                    label = f"Loan #{row['id']} - {owner_name} (₹{row['total_amount']:,.0f})"
-                    loan_options.append(label)
-                    loan_mapping[label] = int(row['id'])
-                    
-                s_master = st.selectbox("Select Master Loan", loan_options)
-                s_borrower = st.selectbox("Select Sub-Borrower", list(member_dict.keys()))
-                s_amount = st.number_input("Amount Taken (₹)", min_value=100, step=500)
-                
-                if st.form_submit_button("💾 Lock Sub-Loan"):
-                    master_loan_id = loan_mapping[s_master]
-                    borrower_id = member_dict[s_borrower]
-                    
-                    supabase.table("individual_settlement").insert({
-                        "master_loan_id": master_loan_id,
-                        "sub_borrower_id": borrower_id,
-                        "amount_taken": float(s_amount)
-                    }).execute()
-                    
-                    clear_db_cache()
-                    st.toast(f"✅ Sub-loan of ₹{s_amount} assigned to {s_borrower}!", icon="🤝")
-                    st.rerun()
+def style_receivables(row):
+    # Colors row green if it is fully collected
+    if row.get('Remaining to Collect', 1) <= 0:
+        return ['background-color: #D1E7DD; color: #0F5132; font-weight: bold'] * len(row)
+    return [''] * len(row)
 
-    with col_l2:
-        with st.expander("⚙️ Manage Existing Splits", expanded=False):
-            if not settlements_df.empty:
-                split_options = []
-                split_mapping = {}
-                for _, row in settlements_df.iterrows():
-                    sub_name = id_to_name.get(row['sub_borrower_id'], 'Unknown')
-                    master_loan = loans_df[loans_df['id'] == row['master_loan_id']]
-                    if not master_loan.empty:
-                        master_name = id_to_name.get(master_loan.iloc[0]['target_member_id'], 'Unknown')
-                        label = f"Split #{row['id']} - {sub_name} took ₹{row['amount_taken']:,.0f} from {master_name}'s Loan"
-                    else:
-                        label = f"Split #{row['id']} - {sub_name} took ₹{row['amount_taken']:,.0f}"
-                        
-                    split_options.append(label)
-                    split_mapping[label] = int(row['id'])
-
-                s_edit = st.selectbox("Select Split to Modify", ["-- Select --"] + split_options)
-
-                if s_edit != "-- Select --":
-                    target_id = split_mapping[s_edit]
-                    target_row = settlements_df[settlements_df['id'] == target_id].iloc[0]
-
-                    with st.form("edit_split_form"):
-                        st.write("**Edit Split Amount**")
-                        new_amount = st.number_input("Amount Taken (₹)", min_value=100, step=500, value=int(target_row['amount_taken']))
-                        
-                        c_a, c_b = st.columns(2)
-                        if c_a.form_submit_button("💾 Update Amount"):
-                            supabase.table("individual_settlement").update({"amount_taken": float(new_amount)}).eq("id", target_id).execute()
-                            clear_db_cache()
-                            st.toast(f"✅ Split updated successfully!", icon="💾")
-                            st.rerun()
-                            
-                        if c_b.form_submit_button("🗑️ Delete Split"):
-                            supabase.table("individual_settlement").delete().eq("id", target_id).execute()
-                            clear_db_cache()
-                            st.toast("✅ Split removed permanently!", icon="🗑️")
-                            st.rerun()
-            else:
-                st.info("No unofficial splits have been created yet.")
-
-    # ==========================================
-    # 2. BRING TO MEETING MATRIX
-    # ==========================================
-    st.markdown("<br><div class='section-header'>📊 Individual Settlement Statement</div>", unsafe_allow_html=True)
+# ==========================================
+# UI COMPONENT: SETTLEMENT ALLOCATOR
+# ==========================================
+def render_individual_settlement(member_dict, target_year, target_month, target_date_obj, id_to_name, emis_df, loans_df, settlements_df, hide_paid_settlements):
+    st.divider()
+    st.markdown("### 📊 Individual Settlement Statement & Allocator")
     
-    # --- GLOBAL CALENDAR SYNC ---
-    selected_year = global_target_date.year
-    selected_month = global_target_date.month
-    selected_month_name = calendar.month_name[selected_month]
-    target_date = datetime(selected_year, selected_month, 15).date()
-    
-    selected_member_names = st.multiselect(
-        "Target Member(s) [Select multiple to combine aliases]", 
-        options=list(member_dict.keys())
+    settlement_members = st.multiselect(
+        "Target Member(s) [Select multiple to combine aliases]",
+        options=list(member_dict.keys()),
+        help="Select member(s) to view their comprehensive settlement and route payments to the EMI table."
     )
     
-    if not selected_member_names:
-        st.info("Please select at least one member to view their settlement statement.")
-        return
+    if settlement_members:
+        # Checkbox to toggle Paid Loans
+        hide_paid_settlements_local = st.checkbox("Hide fully paid loans (Check to view only pending)", value=hide_paid_settlements, key="hide_paid_settle")
+        
+        settle_ids = [member_dict[n] for n in settlement_members]
+        
+        direct_payables_data = []
+        subloan_payables_data = []
+        receivables_data = []
+        
+        total_direct_liability = 0.0
+        total_sub_loans_payable = 0.0
+        total_sub_loans_receivable = 0.0
+        
+        # 1. Direct Loans Calculations
+        if not emis_df.empty:
+            emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'])
+            
+            for _, row in emis_df.iterrows():
+                try:
+                    row_member_id = int(float(row['member_id']))
+                except (ValueError, TypeError):
+                    continue
+                    
+                if row_member_id in settle_ids:
+                    pay_date = row['pay_date']
+                    status = str(row.get('status', 'Pending'))
+                    
+                    is_current = (pay_date.year == target_year and pay_date.month == target_month)
+                    is_overdue = ((pay_date.year < target_year) or (pay_date.year == target_year and pay_date.month < target_month)) and (status != 'Paid')
+                    
+                    if is_current or is_overdue:
+                        exact_ticket_name = id_to_name.get(row_member_id, 'Unknown')
+                        
+                        exp = float(row['total_expected']) if pd.notna(row.get('total_expected')) else 0.0
+                        p_c = float(row['paid_cash']) if pd.notna(row.get('paid_cash')) else 0.0
+                        p_o = float(row['paid_online']) if pd.notna(row.get('paid_online')) else 0.0
+                        
+                        already_paid = p_c + p_o
+                        remaining = exp - already_paid
+                        
+                        if hide_paid_settlements_local and remaining <= 0:
+                            continue
+                            
+                        total_direct_liability += remaining
+                        direct_payables_data.append({
+                            "master_id": row_member_id,
+                            "Source": f"Direct Loan #{row.get('loan_id', '?')} (EMI #{row.get('emi_number', '?')})",
+                            "Belongs To": exact_ticket_name,
+                            "Expected": exp,
+                            "Already Paid": already_paid,
+                            "Remaining Due": remaining,
+                            "Cash Paid (₹)": 0.0,
+                            "Bank Paid (₹)": 0.0
+                        })
+                
+        # 2. Sub-Loans Taken Calculations
+        if not settlements_df.empty and not loans_df.empty:
+            my_sub_loans = settlements_df[settlements_df['sub_borrower_id'].isin(settle_ids)]
+            for _, sub in my_sub_loans.iterrows():
+                exact_borrower_name = id_to_name.get(sub['sub_borrower_id'], 'Unknown')
+                master_loan = loans_df[loans_df['id'] == sub['master_loan_id']].iloc[0]
+                master_owner_id = int(master_loan['target_member_id'])
+                master_owner_name = id_to_name.get(master_owner_id, 'Unknown')
+                
+                calc = calculate_sub_loan_month(
+                    amount_taken=float(sub['amount_taken']),
+                    duration_months=int(master_loan['duration_months']),
+                    start_date_str=master_loan['created_at'],
+                    target_date=target_date_obj
+                )
+                
+                if calc:
+                    master_emi_paid = False
+                    if not emis_df.empty:
+                        m_emi = emis_df[(emis_df['loan_id'] == master_loan['id']) & (emis_df['emi_number'] == calc['emi_number'])]
+                        if not m_emi.empty and m_emi.iloc[0].get('status') == 'Paid':
+                            master_emi_paid = True
+                            
+                    if hide_paid_settlements_local and master_emi_paid:
+                        continue
+                        
+                    total_due = float(calc['total_due'])
+                    already_paid = total_due if master_emi_paid else 0.0
+                    remaining = 0.0 if master_emi_paid else total_due
+                    
+                    total_sub_loans_payable += remaining
+                    
+                    subloan_payables_data.append({
+                        "master_id": master_owner_id, 
+                        "Source": f"Sub-Loan from {master_owner_name} (EMI #{calc['emi_number']})",
+                        "Belongs To": exact_borrower_name,
+                        "Expected": total_due,
+                        "Already Paid": already_paid,
+                        "Remaining Due": remaining,
+                        "Cash Paid (₹)": 0.0,
+                        "Bank Paid (₹)": 0.0
+                    })
+                    
+        # 3. Sub-Loans Given (Receivables)
+        if not settlements_df.empty and not loans_df.empty:
+            my_master_loans = loans_df[loans_df['target_member_id'].isin(settle_ids)]['id'].tolist()
+            lent_out = settlements_df[settlements_df['master_loan_id'].isin(my_master_loans)]
+            
+            for _, lent in lent_out.iterrows():
+                sub_borrower_name = id_to_name.get(lent['sub_borrower_id'], 'Unknown')
+                master_loan = loans_df[loans_df['id'] == lent['master_loan_id']].iloc[0]
+                exact_originating_name = id_to_name.get(master_loan['target_member_id'], 'Unknown')
+                
+                calc = calculate_sub_loan_month(
+                    amount_taken=float(lent['amount_taken']),
+                    duration_months=int(master_loan['duration_months']),
+                    start_date_str=master_loan['created_at'],
+                    target_date=target_date_obj
+                )
+                
+                if calc:
+                    master_emi_paid = False
+                    if not emis_df.empty:
+                        m_emi = emis_df[(emis_df['loan_id'] == master_loan['id']) & (emis_df['emi_number'] == calc['emi_number'])]
+                        if not m_emi.empty and m_emi.iloc[0].get('status') == 'Paid':
+                            master_emi_paid = True
+                            
+                    if hide_paid_settlements_local and master_emi_paid:
+                        continue
+                        
+                    amount_to_collect = float(calc['total_due'])
+                    already_collected = amount_to_collect if master_emi_paid else 0.0
+                    remaining = 0.0 if master_emi_paid else amount_to_collect
+                    
+                    total_sub_loans_receivable += remaining
+                    
+                    receivables_data.append({
+                        "Sub-Lent To": sub_borrower_name,
+                        "Originating Loan": f"Direct Loan #{lent['master_loan_id']} (EMI #{calc['emi_number']})",
+                        "Expected": amount_to_collect,
+                        "Already Collected": already_collected,
+                        "Remaining to Collect": remaining
+                    })
 
-    selected_member_ids = [member_dict[name] for name in selected_member_names]
-    st.divider()
-    
-    # ------------------------------------------
-    # PRE-CALCULATE ALL DATA FOR KPIs AND TABLES
-    # ------------------------------------------
-    direct_payables_data = []
-    subloan_payables_data = []
-    receivables_data = []
-    
-    total_direct_liability = 0.0
-    total_sub_loans_payable = 0.0
-    total_sub_loans_receivable = 0.0
-    
-    # 1. Calculate Payables (Direct Loans)
-    if not emis_df.empty:
-        emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'])
-        direct_emis = emis_df[(emis_df['member_id'].isin(selected_member_ids)) & 
-                              (emis_df['pay_date'].dt.year == selected_year) & 
-                              (emis_df['pay_date'].dt.month == selected_month)]
-                              
-        for _, row in direct_emis.iterrows():
-            exact_ticket_name = id_to_name.get(row['member_id'], 'Unknown')
-            total_expected = float(row['total_expected'])
-            total_direct_liability += total_expected
-            
-            direct_payables_data.append({
-                "Source": f"Direct Loan #{row['loan_id']}",
-                "Belongs To": exact_ticket_name,
-                "EMI No.": int(row['emi_number']),
-                "Principal": float(row['principal_due']),
-                "Interest": float(row['interest_due']),
-                "Total To Pay": total_expected
-            })
-            
-    # 2. Calculate Payables (Sub-Loans Taken)
-    if not settlements_df.empty:
-        my_sub_loans = settlements_df[settlements_df['sub_borrower_id'].isin(selected_member_ids)]
-        for _, sub in my_sub_loans.iterrows():
-            exact_borrower_name = id_to_name.get(sub['sub_borrower_id'], 'Unknown')
-            master_loan = loans_df[loans_df['id'] == sub['master_loan_id']].iloc[0]
-            master_owner_name = id_to_name.get(master_loan['target_member_id'], 'Unknown')
-            
-            calc = calculate_sub_loan_month(
-                amount_taken=float(sub['amount_taken']),
-                duration_months=int(master_loan['duration_months']),
-                start_date_str=master_loan['created_at'],
-                target_date=target_date
+        # Render Financial Overview
+        net_total_payable = (total_direct_liability - total_sub_loans_receivable) + total_sub_loans_payable
+        
+        st.markdown("#### 💼 Financial Overview")
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("1️⃣ Direct Loan Liability", f"₹{total_direct_liability:,.0f}")
+        kpi2.metric("2️⃣ Total Net (Bring to Meeting)", f"₹{net_total_payable:,.0f}")
+        kpi3.metric("3️⃣ Sub-Loans Payable", f"₹{total_sub_loans_payable:,.0f}")
+        kpi4.metric("4️⃣ Sub-Loans Receivable", f"₹{total_sub_loans_receivable:,.0f}")
+
+        # Render Interactive Allocation Tables
+        st.markdown("#### 🎯 Allocate Funds & Stage to EMI Table")
+        st.caption("Enter Cash or Bank amounts directly in the tables below. Click 'Populate' to automatically send the funds to the correct Master Loan holder in the EMI table.")
+        
+        edited_direct = pd.DataFrame()
+        edited_sub = pd.DataFrame()
+        
+        # --- DIRECT LOANS TABLE ---
+        if direct_payables_data:
+            st.write("**🔴 Direct Loans Owed**")
+            df_direct = pd.DataFrame(direct_payables_data)
+            edited_direct = st.data_editor(
+                df_direct.style.apply(style_payables, axis=1),
+                column_config={
+                    "master_id": None, 
+                    "Expected": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
+                    "Already Paid": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
+                    "Remaining Due": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
+                    "Source": st.column_config.TextColumn(disabled=True),
+                    "Belongs To": st.column_config.TextColumn(disabled=True),
+                    "Cash Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0),
+                    "Bank Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0)
+                },
+                hide_index=True, use_container_width=True, key=f"alloc_dir_{st.session_state['form_reset_key']}"
             )
-            
-            if calc:
-                total_due = float(calc['total_due'])
-                total_sub_loans_payable += total_due
-                
-                subloan_payables_data.append({
-                    "Source": f"Sub-Loan from {master_owner_name}",
-                    "Belongs To": exact_borrower_name,
-                    "EMI No.": calc['emi_number'],
-                    "Principal": calc['principal_due'],
-                    "Interest": calc['interest_due'],
-                    "Total To Pay": total_due
-                })
-                
-    # 3. Calculate Receivables (Sub-Loans Given)
-    if not settlements_df.empty:
-        my_master_loans = loans_df[loans_df['target_member_id'].isin(selected_member_ids)]['id'].tolist()
-        lent_out = settlements_df[settlements_df['master_loan_id'].isin(my_master_loans)]
-        
-        for _, lent in lent_out.iterrows():
-            sub_borrower_name = id_to_name.get(lent['sub_borrower_id'], 'Unknown')
-            master_loan = loans_df[loans_df['id'] == lent['master_loan_id']].iloc[0]
-            exact_originating_name = id_to_name.get(master_loan['target_member_id'], 'Unknown')
-            
-            calc = calculate_sub_loan_month(
-                amount_taken=float(lent['amount_taken']),
-                duration_months=int(master_loan['duration_months']),
-                start_date_str=master_loan['created_at'],
-                target_date=target_date
+            t_expected = edited_direct['Expected'].sum()
+            t_already = edited_direct['Already Paid'].sum()
+            t_remaining = edited_direct['Remaining Due'].sum()
+            t_cash = edited_direct['Cash Paid (₹)'].sum()
+            t_bank = edited_direct['Bank Paid (₹)'].sum()
+            st.markdown(f"""
+            <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-15px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:30px; font-weight:bold; font-size:14px;'>
+                <span style='color:#94A3B8;'>EXPECTED: ₹{t_expected:,.0f}</span>
+                <span style='color:#94A3B8;'>PAID: ₹{t_already:,.0f}</span>
+                <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_remaining:,.0f}</span></span>
+                <span style='color:#F8FAFC;'>TOTAL CASH: <span style='color:#34D399;'>₹{t_cash:,.0f}</span></span>
+                <span style='color:#F8FAFC;'>TOTAL BANK: <span style='color:#60A5FA;'>₹{t_bank:,.0f}</span></span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- SUB LOANS TABLE ---
+        if subloan_payables_data:
+            st.write("**🟠 Sub-Loans Owed to Others**")
+            df_sub = pd.DataFrame(subloan_payables_data)
+            edited_sub = st.data_editor(
+                df_sub.style.apply(style_payables, axis=1),
+                column_config={
+                    "master_id": None, 
+                    "Expected": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
+                    "Already Paid": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
+                    "Remaining Due": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
+                    "Source": st.column_config.TextColumn(disabled=True),
+                    "Belongs To": st.column_config.TextColumn(disabled=True),
+                    "Cash Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0),
+                    "Bank Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0)
+                },
+                hide_index=True, use_container_width=True, key=f"alloc_sub_{st.session_state['form_reset_key']}"
             )
+            t_sub_expected = edited_sub['Expected'].sum()
+            t_sub_already = edited_sub['Already Paid'].sum()
+            t_sub_remaining = edited_sub['Remaining Due'].sum()
+            t_sub_cash = edited_sub['Cash Paid (₹)'].sum()
+            t_sub_bank = edited_sub['Bank Paid (₹)'].sum()
+            st.markdown(f"""
+            <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-15px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:30px; font-weight:bold; font-size:14px;'>
+                <span style='color:#94A3B8;'>EXPECTED: ₹{t_sub_expected:,.0f}</span>
+                <span style='color:#94A3B8;'>PAID: ₹{t_sub_already:,.0f}</span>
+                <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_sub_remaining:,.0f}</span></span>
+                <span style='color:#F8FAFC;'>TOTAL CASH: <span style='color:#34D399;'>₹{t_sub_cash:,.0f}</span></span>
+                <span style='color:#F8FAFC;'>TOTAL BANK: <span style='color:#60A5FA;'>₹{t_sub_bank:,.0f}</span></span>
+            </div>
+            """, unsafe_allow_html=True)
             
-            if calc:
-                amount_to_collect = float(calc['total_due'])
-                total_sub_loans_receivable += amount_to_collect
+        if receivables_data:
+            st.write("**🟢 Sub-Loans to Collect** (Read-Only)")
+            df_rec = pd.DataFrame(receivables_data)
+            st.dataframe(
+                df_rec.style.apply(style_receivables, axis=1),
+                column_config={
+                    "Expected": st.column_config.NumberColumn(format="₹%.0f"),
+                    "Already Collected": st.column_config.NumberColumn(format="₹%.0f"),
+                    "Remaining to Collect": st.column_config.NumberColumn(format="₹%.0f")
+                },
+                hide_index=True, use_container_width=True
+            )
+
+        # Single button to process all interactive tables at once
+        if not edited_direct.empty or not edited_sub.empty:
+            if st.button("⬇️ Populate Entered Funds to EMI Table", type="primary"):
+                staged_any = False
                 
-                receivables_data.append({
-                    "Sub-Lent To": sub_borrower_name,
-                    "Originating Loan": f"Direct Loan #{lent['master_loan_id']} ({exact_originating_name})",
-                    "EMI No.": calc['emi_number'],
-                    "Principal": calc['principal_due'],
-                    "Interest": calc['interest_due'],
-                    "Amount to Collect": amount_to_collect
-                })
+                def process_allocated_funds(df):
+                    nonlocal staged_any
+                    for _, row in df.iterrows():
+                        c_amt = float(row.get('Cash Paid (₹)', 0.0) or 0.0)
+                        b_amt = float(row.get('Bank Paid (₹)', 0.0) or 0.0)
+                        if c_amt > 0 or b_amt > 0:
+                            m_id = int(row['master_id'])
+                            if m_id not in st.session_state['prefill_emi']:
+                                st.session_state['prefill_emi'][m_id] = {'cash': 0.0, 'bank': 0.0}
+                            st.session_state['prefill_emi'][m_id]['cash'] += c_amt
+                            st.session_state['prefill_emi'][m_id]['bank'] += b_amt
+                            staged_any = True
 
-    # --- RENDER 4-PART KPI ROW ---
-    # Net logic: (What you owe directly - What others are paying you for it) + What you owe others
-    net_total_payable = (total_direct_liability - total_sub_loans_receivable) + total_sub_loans_payable
-    
-    st.markdown("### 💼 Financial Overview")
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("1️⃣ Direct Loan Liability", f"₹{total_direct_liability:,.0f}")
-    kpi2.metric("2️⃣ Total Net (Bring to Meeting)", f"₹{net_total_payable:,.0f}")
-    kpi3.metric("3️⃣ Sub-Loans Payable (Owed to Others)", f"₹{total_sub_loans_payable:,.0f}")
-    kpi4.metric("4️⃣ Sub-Loans Receivable (Collect from Others)", f"₹{total_sub_loans_receivable:,.0f}")
-    
-    st.divider()
-    
-    # ------------------------------------------
-    # TABLE A1: LIABILITIES (DIRECT LOANS)
-    # ------------------------------------------
-    st.subheader(f"🔴 Accounts Payable: Direct Loans")
-    
-    format_dict = {'Principal': '₹{:,.0f}', 'Interest': '₹{:,.0f}', 'Total To Pay': '₹{:,.0f}'}
-    
-    if direct_payables_data:
-        df_direct = pd.DataFrame(direct_payables_data)
-        total_direct_cash = df_direct['Total To Pay'].sum()
-        
-        df_direct.loc['FINAL TOTAL'] = ["", "DIRECT LOAN TOTAL", "", df_direct['Principal'].sum(), df_direct['Interest'].sum(), total_direct_cash]
-        
-        def highlight_total_direct(s):
-            if s.name == 'FINAL TOTAL': return ['background-color: #fef9e7; font-weight: bold; color: #b7950b'] * len(s)
-            return [''] * len(s)
-            
-        st.dataframe(df_direct.style.format(format_dict).apply(highlight_total_direct, axis=1), hide_index=True, use_container_width=True)
-    else:
-        st.success(f"✅ Selected members have no direct liabilities due for {selected_month_name} {selected_year}.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ------------------------------------------
-    # TABLE A2: LIABILITIES (SUB-LOANS)
-    # ------------------------------------------
-    st.subheader(f"🟠 Accounts Payable: Sub-Loans (Owed to Others)")
-    
-    if subloan_payables_data:
-        df_sub = pd.DataFrame(subloan_payables_data)
-        total_sub_cash = df_sub['Total To Pay'].sum()
-        
-        df_sub.loc['FINAL TOTAL'] = ["", "SUB-LOAN TOTAL", "", df_sub['Principal'].sum(), df_sub['Interest'].sum(), total_sub_cash]
-        
-        def highlight_total_sub(s):
-            if s.name == 'FINAL TOTAL': return ['background-color: #fef9e7; font-weight: bold; color: #d35400'] * len(s)
-            return [''] * len(s)
-            
-        st.dataframe(df_sub.style.format(format_dict).apply(highlight_total_sub, axis=1), hide_index=True, use_container_width=True)
-    else:
-        st.info("No sub-loan liabilities owed to others this month.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # ------------------------------------------
-    # TABLE B: RECEIVABLES
-    # ------------------------------------------
-    st.subheader(f"🟢 Accounts Receivable: What must be COLLECTED before the meeting")
-    
-    if receivables_data:
-        df_receivables = pd.DataFrame(receivables_data)
-        
-        total_collect_cash = df_receivables['Amount to Collect'].sum()
-        df_receivables.loc['FINAL TOTAL'] = ["", "TOTAL TO COLLECT", "", df_receivables['Principal'].sum(), df_receivables['Interest'].sum(), total_collect_cash]
-        
-        format_dict_rec = {'Principal': '₹{:,.0f}', 'Interest': '₹{:,.0f}', 'Amount to Collect': '₹{:,.0f}'}
-        
-        def highlight_total_rec(s):
-            if s.name == 'FINAL TOTAL': return ['background-color: #e8f8f5; font-weight: bold; color: #117a65'] * len(s)
-            return [''] * len(s)
-            
-        st.dataframe(df_receivables.style.format(format_dict_rec).apply(highlight_total_rec, axis=1), hide_index=True, use_container_width=True)
-    else:
-        st.info("No sub-loans to collect this month.")
+                if not edited_direct.empty: process_allocated_funds(edited_direct)
+                if not edited_sub.empty: process_allocated_funds(edited_sub)
+                
+                if staged_any:
+                    st.session_state['form_reset_key'] += 1 # Force grid redraw
+                    st.toast("✅ Funds successfully staged to the EMI table!", icon="⬇️")
+                    st.rerun()
+                else:
+                    st.warning("Please enter at least one amount greater than 0 in the tables above.")
