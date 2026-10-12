@@ -26,9 +26,19 @@ def render_dashboard(members_df, member_dict, global_target_date):
     # PRE-CALCULATE GLOBAL & MONTHLY DATA
     # ==========================================
     
-    # 1. Treasury / Available Balance
-    total_receipts_all_time = receipts_df['amount_cash'].sum() + receipts_df['amount_online'].sum() if not receipts_df.empty else 0.0
+    # 1. Treasury / Available Balance 
+    # CRITICAL FIX: Filter out legacy negative 'Disbursement' ghost records that persist after loan deletion
+    if not receipts_df.empty:
+        inward_receipts = receipts_df[(receipts_df['amount_cash'] >= 0) & 
+                                      (receipts_df['amount_online'] >= 0) & 
+                                      (~receipts_df['payment_type'].str.contains("Disbursement", case=False, na=False))]
+        total_receipts_all_time = inward_receipts['amount_cash'].sum() + inward_receipts['amount_online'].sum()
+    else:
+        total_receipts_all_time = 0.0
+
     total_disbursed_all_time = loans_df['total_amount'].sum() if not loans_df.empty else 0.0
+    
+    # Dynamic real-time calculation based purely on active tables
     final_balance_as_of_now = st.session_state["manual_balance_adj"] + total_receipts_all_time - total_disbursed_all_time
 
     # 2. Monthly Collections
@@ -38,7 +48,8 @@ def render_dashboard(members_df, member_dict, global_target_date):
     if not receipts_df.empty:
         receipts_df['logged_at'] = pd.to_datetime(receipts_df['logged_at'])
         this_month_receipts = receipts_df[(receipts_df['logged_at'].dt.month == target_month) & 
-                                          (receipts_df['logged_at'].dt.year == target_year)]
+                                          (receipts_df['logged_at'].dt.year == target_year) &
+                                          (receipts_df['amount_cash'] >= 0)] # Ignore negative ghost records
         
         savings_receipts = this_month_receipts[this_month_receipts['payment_type'] == 'Savings']
         emi_receipts = this_month_receipts[this_month_receipts['payment_type'] != 'Savings']
@@ -181,6 +192,9 @@ def render_dashboard(members_df, member_dict, global_target_date):
                         # 4. Push to database
                         supabase.table("emi_ledger").insert(emis_payload).execute()
                         
+                        # Note: We NO LONGER insert into payment_receipts here. 
+                        # The Treasury balance natively calculates itself using the Loans table above!
+                        
                         st.success(f"✅ Loan #{new_loan_id} successfully issued to {selected_member}!")
                         
                         from database import clear_db_cache
@@ -221,6 +235,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
     # ==========================================
     st.markdown("### 🌍 Global Portfolio & All-Time Stats")
     
+    # Dynamically pull true sum of current database state
     total_disbursed = loans_df['total_amount'].sum() if not loans_df.empty else 0.0
     outstanding_emis = 0.0
     total_outstanding_principal = 0.0
