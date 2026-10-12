@@ -31,7 +31,8 @@ def render_dashboard(members_df, member_dict, global_target_date):
     monthly_collected_emi = 0.0
     
     if not receipts_df.empty:
-        receipts_df['logged_at'] = pd.to_datetime(receipts_df['logged_at'])
+        # FIXED: Added format='mixed' to handle Supabase fractional seconds
+        receipts_df['logged_at'] = pd.to_datetime(receipts_df['logged_at'], format='mixed', errors='coerce')
         this_month_receipts = receipts_df[(receipts_df['logged_at'].dt.month == target_month) & 
                                           (receipts_df['logged_at'].dt.year == target_year) &
                                           (receipts_df['amount_cash'] >= 0)] # Ignore ghost negative records
@@ -45,7 +46,8 @@ def render_dashboard(members_df, member_dict, global_target_date):
     # 2. Monthly Disbursements
     monthly_disbursed = 0.0
     if not loans_df.empty:
-        loans_df['created_at'] = pd.to_datetime(loans_df['created_at'])
+        # FIXED: Added format='mixed' to handle Supabase fractional seconds
+        loans_df['created_at'] = pd.to_datetime(loans_df['created_at'], format='mixed', errors='coerce')
         this_month_loans = loans_df[(loans_df['created_at'].dt.month == target_month) & 
                                     (loans_df['created_at'].dt.year == target_year)]
         monthly_disbursed = this_month_loans['total_amount'].astype(float).sum()
@@ -57,7 +59,8 @@ def render_dashboard(members_df, member_dict, global_target_date):
     matrix_data = []
     
     if not emis_df.empty:
-        emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'])
+        # FIXED: Added format='mixed' to handle Supabase fractional seconds
+        emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'], format='mixed', errors='coerce')
         this_month_emis = emis_df[(emis_df['pay_date'].dt.month == target_month) & 
                                   (emis_df['pay_date'].dt.year == target_year)]
         
@@ -245,7 +248,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
         total_disbursed = loans_df['total_amount'].astype(float).sum()
         
         if not emis_df.empty:
-            # CRITICAL FIX: Filter out "Orphan EMIs" that belong to deleted loans
+            # Filter out "Orphan EMIs" that belong to deleted loans
             valid_loan_ids = loans_df['id'].tolist()
             valid_emis = emis_df[emis_df['loan_id'].isin(valid_loan_ids)]
             
