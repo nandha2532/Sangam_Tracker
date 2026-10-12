@@ -25,9 +25,10 @@ def render_dashboard(members_df, member_dict, global_target_date):
     # PRE-CALCULATE GLOBAL & MONTHLY DATA
     # ==========================================
     
-    # 1. Treasury / Available Balance
+    # 1. Treasury / Available Balance (FIXED: Subtracts total loans natively instead of using negative receipts)
     total_receipts_all_time = receipts_df['amount_cash'].sum() + receipts_df['amount_online'].sum() if not receipts_df.empty else 0.0
-    final_balance_as_of_now = st.session_state["manual_balance_adj"] + total_receipts_all_time
+    total_disbursed_all_time = loans_df['total_amount'].sum() if not loans_df.empty else 0.0
+    final_balance_as_of_now = st.session_state["manual_balance_adj"] + total_receipts_all_time - total_disbursed_all_time
 
     # 2. Monthly Collections
     monthly_collected_savings = 0.0
@@ -140,7 +141,6 @@ def render_dashboard(members_df, member_dict, global_target_date):
                 elif loan_amt <= 0:
                     st.error("Loan amount must be greater than 0.")
                 else:
-                    # CRITICAL FIX: Convert Pandas/Numpy np.int64 to standard Python int()
                     m_id = int(member_dict[selected_member])
                     
                     true_principal = float(loan_amt - part_pay)
@@ -178,14 +178,8 @@ def render_dashboard(members_df, member_dict, global_target_date):
                             })
                         supabase.table("emi_ledger").insert(emis).execute()
                         
-                        # 3. Auto-Deduct FULL AMOUNT from Treasury Balance
-                        supabase.table("payment_receipts").insert({
-                            "member_id": m_id,
-                            "payment_type": f"Loan Disbursement (Loan #{new_loan_id})",
-                            "amount_cash": float(-loan_amt),
-                            "amount_online": 0.0,
-                            "logged_at": global_target_date.strftime('%Y-%m-%d')
-                        }).execute()
+                        # Note: We NO LONGER insert into payment_receipts here. 
+                        # The Treasury balance natively calculates itself using the Loans table above!
                         
                         st.success(f"✅ Loan #{new_loan_id} successfully issued to {selected_member}!")
                         
