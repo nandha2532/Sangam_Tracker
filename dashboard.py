@@ -3,6 +3,7 @@ import pandas as pd
 import calendar
 from datetime import datetime
 from database import supabase, fetch_table
+from calculations import generate_emi_schedule
 
 def render_dashboard(members_df, member_dict, global_target_date):
     st.markdown("<h1 style='color:#34D399;'>📱 Sangam Daily Operations</h1>", unsafe_allow_html=True)
@@ -25,7 +26,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
     # PRE-CALCULATE GLOBAL & MONTHLY DATA
     # ==========================================
     
-    # 1. Treasury / Available Balance (FIXED: Subtracts total loans natively instead of using negative receipts)
+    # 1. Treasury / Available Balance
     total_receipts_all_time = receipts_df['amount_cash'].sum() + receipts_df['amount_online'].sum() if not receipts_df.empty else 0.0
     total_disbursed_all_time = loans_df['total_amount'].sum() if not loans_df.empty else 0.0
     final_balance_as_of_now = st.session_state["manual_balance_adj"] + total_receipts_all_time - total_disbursed_all_time
@@ -143,9 +144,6 @@ def render_dashboard(members_df, member_dict, global_target_date):
                 else:
                     m_id = int(member_dict[selected_member])
                     
-                    true_principal = float(loan_amt - part_pay)
-                    base_emi_expected = true_principal / int(duration_m)
-                    
                     # 1. Insert Loan into database
                     loan_data = {
                         "target_member_id": m_id,
@@ -159,27 +157,29 @@ def render_dashboard(members_df, member_dict, global_target_date):
                     if res.data:
                         new_loan_id = int(res.data[0]['id'])
                         
-                        # 2. Generate the EMI Schedule
-                        emis = []
-                        for i in range(1, int(duration_m) + 1):
-                            next_date = (pd.to_datetime(first_emi_date) + pd.DateOffset(months=i-1)).strftime('%Y-%m-%d')
-                            
-                            current_month_expected = float((base_emi_expected + part_pay) if i == 1 else base_emi_expected)
-                            
-                            emis.append({
-                                "loan_id": new_loan_id,
-                                "member_id": m_id,
-                                "emi_number": int(i),
-                                "total_expected": current_month_expected,
-                                "pay_date": str(next_date),
-                                "status": "Pending",
-                                "paid_cash": 0.0,
-                                "paid_online": 0.0
-                            })
-                        supabase.table("emi_ledger").insert(emis).execute()
+                        # 2. Generate the EMI Schedule using your centralized calculator!
+                        schedule_df = generate_emi_schedule(new_loan_id, float(loan_amt), float(part_pay), int(duration_m), first_emi_date)
+                        schedule_df['member_id'] = m_id
                         
-                        # Note: We NO LONGER insert into payment_receipts here. 
-                        # The Treasury balance natively calculates itself using the Loans table above!
+                        # Ensure dates are strings for Supabase JSON payload
+                        if 'pay_date' in schedule_df.columns:
+                            schedule_df['pay_date'] = schedule_df['pay_date'].astype(str)
+                            
+                        # 3. Clean Types: Convert any Pandas/Numpy types to standard Python types
+                        emis_payload = []
+                        for record in schedule_df.to_dict('records'):
+                            clean_record = {}
+                            for k, v in record.items():
+                                if pd.isna(v):
+                                    clean_record[k] = None
+                                elif hasattr(v, 'item'):  # Checks if it's a numpy type (like np.int64)
+                                    clean_record[k] = v.item()
+                                else:
+                                    clean_record[k] = v
+                            emis_payload.append(clean_record)
+                            
+                        # 4. Push to database
+                        supabase.table("emi_ledger").insert(emis_payload).execute()
                         
                         st.success(f"✅ Loan #{new_loan_id} successfully issued to {selected_member}!")
                         
