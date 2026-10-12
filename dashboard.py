@@ -10,7 +10,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
     
     # Initialize Manual Adjustment State 
     if "manual_balance_adj" not in st.session_state:
-        st.session_state["manual_balance_adj"] = 216.0
+        st.session_state["manual_balance_adj"] = 0.0
         
     # Fetch Data
     loans_df = fetch_table("loans")
@@ -23,25 +23,10 @@ def render_dashboard(members_df, member_dict, global_target_date):
     selected_month_name = calendar.month_name[target_month]
     
     # ==========================================
-    # PRE-CALCULATE GLOBAL & MONTHLY DATA
+    # PRE-CALCULATE MONTHLY DATA
     # ==========================================
     
-    # 1. Treasury / Available Balance 
-    # CRITICAL FIX: Filter out legacy negative 'Disbursement' ghost records that persist after loan deletion
-    if not receipts_df.empty:
-        inward_receipts = receipts_df[(receipts_df['amount_cash'] >= 0) & 
-                                      (receipts_df['amount_online'] >= 0) & 
-                                      (~receipts_df['payment_type'].str.contains("Disbursement", case=False, na=False))]
-        total_receipts_all_time = inward_receipts['amount_cash'].sum() + inward_receipts['amount_online'].sum()
-    else:
-        total_receipts_all_time = 0.0
-
-    total_disbursed_all_time = loans_df['total_amount'].sum() if not loans_df.empty else 0.0
-    
-    # Dynamic real-time calculation based purely on active tables
-    final_balance_as_of_now = st.session_state["manual_balance_adj"] + total_receipts_all_time - total_disbursed_all_time
-
-    # 2. Monthly Collections
+    # 1. Monthly Collections
     monthly_collected_savings = 0.0
     monthly_collected_emi = 0.0
     
@@ -49,7 +34,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
         receipts_df['logged_at'] = pd.to_datetime(receipts_df['logged_at'])
         this_month_receipts = receipts_df[(receipts_df['logged_at'].dt.month == target_month) & 
                                           (receipts_df['logged_at'].dt.year == target_year) &
-                                          (receipts_df['amount_cash'] >= 0)] # Ignore negative ghost records
+                                          (receipts_df['amount_cash'] >= 0)] # Ignore ghost negative records
         
         savings_receipts = this_month_receipts[this_month_receipts['payment_type'] == 'Savings']
         emi_receipts = this_month_receipts[this_month_receipts['payment_type'] != 'Savings']
@@ -57,7 +42,15 @@ def render_dashboard(members_df, member_dict, global_target_date):
         monthly_collected_savings = savings_receipts['amount_cash'].sum() + savings_receipts['amount_online'].sum()
         monthly_collected_emi = emi_receipts['amount_cash'].sum() + emi_receipts['amount_online'].sum()
 
-    # 3. Monthly Expected
+    # 2. Monthly Disbursements
+    monthly_disbursed = 0.0
+    if not loans_df.empty:
+        loans_df['created_at'] = pd.to_datetime(loans_df['created_at'])
+        this_month_loans = loans_df[(loans_df['created_at'].dt.month == target_month) & 
+                                    (loans_df['created_at'].dt.year == target_year)]
+        monthly_disbursed = this_month_loans['total_amount'].astype(float).sum()
+
+    # 3. Monthly Expected Dues
     total_active_members = len(members_df)
     expected_savings_this_month = total_active_members * 500.0
     expected_emis_this_month = 0.0
@@ -93,21 +86,33 @@ def render_dashboard(members_df, member_dict, global_target_date):
     pending_emis_this_month = expected_emis_this_month - monthly_collected_emi
     pending_savings_this_month = expected_savings_this_month - monthly_collected_savings
 
+    # 4. Final Real-Time Treasury Balance
+    total_monthly_in = monthly_collected_savings + monthly_collected_emi
+    final_balance_as_of_now = st.session_state["manual_balance_adj"] + total_monthly_in - monthly_disbursed
+
     # ==========================================
     # UI SECTION 1: MONTHLY CASH FLOW & TREASURY
     # ==========================================
     st.markdown(f"### 🏦 Monthly Cash Flow & Treasury ({selected_month_name} {target_year})")
-    st.markdown("<p style='color: #94A3A0; font-size: 0.9rem;'>Track live collections and available lending capacity.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #94A3A0; font-size: 0.9rem;'>Track live collections and available lending capacity for the current month.</p>", unsafe_allow_html=True)
     
-    # ROW 1: Treasury Balance
-    tc1, tc2, tc3 = st.columns([1, 1, 1])
+    # ROW 1: Treasury Balance Controls
+    tc1, tc2, tc3 = st.columns([1.5, 1, 1])
+    
     with tc1:
-        new_adj = st.number_input("Manual Adjustment / Opening Balance (₹)", value=float(st.session_state["manual_balance_adj"]), step=1.0)
-        if new_adj != st.session_state["manual_balance_adj"]:
+        st.caption("Opening Balance / Carried Forward (₹)")
+        col_a, col_b = st.columns([2, 1])
+        new_adj = col_a.number_input("Opening Balance", value=float(st.session_state["manual_balance_adj"]), step=100.0, label_visibility="collapsed")
+        
+        if col_b.button("🔄 Reset to ₹0", use_container_width=True):
+            st.session_state["manual_balance_adj"] = 0.0
+            st.rerun()
+        elif new_adj != st.session_state["manual_balance_adj"]:
             st.session_state["manual_balance_adj"] = new_adj
             st.rerun()
 
-    tc2.metric("Total Available to Lend", f"₹{final_balance_as_of_now:,.0f}")
+    tc2.metric("Total Monthly Collections", f"₹{total_monthly_in:,.0f}")
+    tc3.metric("Total Available to Lend", f"₹{final_balance_as_of_now:,.0f}", delta=f"-₹{monthly_disbursed:,.0f} Disbursed this month", delta_color="inverse")
     
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -192,9 +197,6 @@ def render_dashboard(members_df, member_dict, global_target_date):
                         # 4. Push to database
                         supabase.table("emi_ledger").insert(emis_payload).execute()
                         
-                        # Note: We NO LONGER insert into payment_receipts here. 
-                        # The Treasury balance natively calculates itself using the Loans table above!
-                        
                         st.success(f"✅ Loan #{new_loan_id} successfully issued to {selected_member}!")
                         
                         from database import clear_db_cache
@@ -235,42 +237,49 @@ def render_dashboard(members_df, member_dict, global_target_date):
     # ==========================================
     st.markdown("### 🌍 Global Portfolio & All-Time Stats")
     
-    # Dynamically pull true sum of current database state
-    total_disbursed = loans_df['total_amount'].sum() if not loans_df.empty else 0.0
+    total_disbursed = 0.0
     outstanding_emis = 0.0
     total_outstanding_principal = 0.0
     
-    if not emis_df.empty and not loans_df.empty:
-        # Calculate Outstanding EMIs
-        pending_emis = emis_df[emis_df['status'] != 'Paid']
-        for _, row in pending_emis.iterrows():
-            expected = float(row['total_expected'])
-            paid = float(row.get('paid_cash', 0)) + float(row.get('paid_online', 0))
-            outstanding_emis += (expected - paid)
+    if not loans_df.empty:
+        total_disbursed = loans_df['total_amount'].astype(float).sum()
+        
+        if not emis_df.empty:
+            # CRITICAL FIX: Filter out "Orphan EMIs" that belong to deleted loans
+            valid_loan_ids = loans_df['id'].tolist()
+            valid_emis = emis_df[emis_df['loan_id'].isin(valid_loan_ids)]
             
-        # Calculate Total Outstanding Principal 
-        for _, loan in loans_df.iterrows():
-            l_id = loan['id']
+            # Calculate Outstanding EMIs
+            pending_emis = valid_emis[valid_emis['status'] != 'Paid']
             
-            total_amt = float(loan['total_amount'])
-            part_payment = float(loan.get('part_payment_initial', 0.0))
-            
-            true_principal = total_amt - part_payment
-            duration = int(loan['duration_months']) if int(loan['duration_months']) > 0 else 1
-            principal_per_month = true_principal / duration
-            
-            # Find all unpaid EMIs for this specific loan
-            unpaid_emis_for_loan = emis_df[(emis_df['loan_id'] == l_id) & (emis_df['status'] != 'Paid')]
-            unpaid_count = len(unpaid_emis_for_loan)
-            
-            # Calculate base remaining principal
-            loan_outstanding_principal = (principal_per_month * unpaid_count)
-            
-            # If EMI #1 is still pending/unpaid, the part payment is still outstanding!
-            if 1 in unpaid_emis_for_loan['emi_number'].values:
-                loan_outstanding_principal += part_payment
+            for _, row in pending_emis.iterrows():
+                expected = float(row['total_expected'])
+                paid = float(row.get('paid_cash', 0)) + float(row.get('paid_online', 0))
+                outstanding_emis += (expected - paid)
                 
-            total_outstanding_principal += loan_outstanding_principal
+            # Calculate True Outstanding Principal
+            for _, loan in loans_df.iterrows():
+                l_id = loan['id']
+                
+                total_amt = float(loan['total_amount'])
+                part_payment = float(loan.get('part_payment_initial', 0.0))
+                
+                true_principal = total_amt - part_payment
+                duration = int(loan['duration_months']) if int(loan['duration_months']) > 0 else 1
+                principal_per_month = true_principal / duration
+                
+                # Find all unpaid EMIs specifically for this loan
+                unpaid_emis_for_loan = pending_emis[pending_emis['loan_id'] == l_id]
+                unpaid_count = len(unpaid_emis_for_loan)
+                
+                # Base outstanding principal is (remaining months * principal per month)
+                loan_outstanding_principal = (principal_per_month * unpaid_count)
+                
+                # If EMI #1 is still pending, the initial part payment is ALSO still outstanding
+                if 1 in unpaid_emis_for_loan['emi_number'].values:
+                    loan_outstanding_principal += part_payment
+                    
+                total_outstanding_principal += loan_outstanding_principal
                 
     gc1, gc2, gc3 = st.columns(3)
     gc1.metric("Total Outstanding Principal", f"₹{total_outstanding_principal:,.0f}")
