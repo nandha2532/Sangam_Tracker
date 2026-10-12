@@ -140,40 +140,38 @@ def render_dashboard(members_df, member_dict, global_target_date):
                 elif loan_amt <= 0:
                     st.error("Loan amount must be greater than 0.")
                 else:
-                    m_id = member_dict[selected_member]
+                    # CRITICAL FIX: Convert Pandas/Numpy np.int64 to standard Python int()
+                    m_id = int(member_dict[selected_member])
                     
-                    # True principal is calculated to find the base EMI, 
-                    # but the FULL loan_amt leaves the treasury.
-                    true_principal = loan_amt - part_pay
-                    base_emi_expected = true_principal / duration_m
+                    true_principal = float(loan_amt - part_pay)
+                    base_emi_expected = true_principal / int(duration_m)
                     
                     # 1. Insert Loan into database
                     loan_data = {
                         "target_member_id": m_id,
-                        "total_amount": loan_amt,
-                        "part_payment_initial": part_pay,
-                        "duration_months": duration_m,
+                        "total_amount": float(loan_amt),
+                        "part_payment_initial": float(part_pay),
+                        "duration_months": int(duration_m),
                         "active_status": True
                     }
                     res = supabase.table("loans").insert(loan_data).execute()
                     
                     if res.data:
-                        new_loan_id = res.data[0]['id']
+                        new_loan_id = int(res.data[0]['id'])
                         
-                        # 2. Generate the EMI Schedule (Stacking part_pay onto Month 1)
+                        # 2. Generate the EMI Schedule
                         emis = []
                         for i in range(1, int(duration_m) + 1):
                             next_date = (pd.to_datetime(first_emi_date) + pd.DateOffset(months=i-1)).strftime('%Y-%m-%d')
                             
-                            # Month 1 gets the Part Payment added to it
-                            current_month_expected = (base_emi_expected + part_pay) if i == 1 else base_emi_expected
+                            current_month_expected = float((base_emi_expected + part_pay) if i == 1 else base_emi_expected)
                             
                             emis.append({
                                 "loan_id": new_loan_id,
                                 "member_id": m_id,
-                                "emi_number": i,
+                                "emi_number": int(i),
                                 "total_expected": current_month_expected,
-                                "pay_date": next_date,
+                                "pay_date": str(next_date),
                                 "status": "Pending",
                                 "paid_cash": 0.0,
                                 "paid_online": 0.0
@@ -184,8 +182,8 @@ def render_dashboard(members_df, member_dict, global_target_date):
                         supabase.table("payment_receipts").insert({
                             "member_id": m_id,
                             "payment_type": f"Loan Disbursement (Loan #{new_loan_id})",
-                            "amount_cash": -loan_amt, # <-- Fixed: Full amount leaves the Sangam
-                            "amount_online": 0,
+                            "amount_cash": float(-loan_amt),
+                            "amount_online": 0.0,
                             "logged_at": global_target_date.strftime('%Y-%m-%d')
                         }).execute()
                         
@@ -224,7 +222,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
 
     st.divider()
 
-   # ==========================================
+    # ==========================================
     # UI SECTION 4: GLOBAL PORTFOLIO OVERVIEW
     # ==========================================
     st.markdown("### 🌍 Global Portfolio & All-Time Stats")
@@ -269,4 +267,3 @@ def render_dashboard(members_df, member_dict, global_target_date):
     gc1.metric("Total Outstanding Principal", f"₹{total_outstanding_principal:,.0f}")
     gc2.metric("Outstanding EMIs (All Time)", f"₹{outstanding_emis:,.0f}")
     gc3.metric("Total Disbursed", f"₹{total_disbursed:,.0f}")
-                

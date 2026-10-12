@@ -318,4 +318,4 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                     st.toast("✅ Funds successfully staged to the EMI table!", icon="⬇️")
                     st.rerun()
                 else:
-                    st.warning("Please enter at least one amount greater than 0 in the tables above.")
+                    st.warning("Please enter at least one amount greater than 0 in the tables above.")  
