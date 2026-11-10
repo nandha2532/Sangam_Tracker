@@ -2,30 +2,40 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    - cron: '0 0 * * 1,4'
+    # Runs at 00:00 UTC every single day
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
   ping-database:
     runs-on: ubuntu-latest
     steps:
-      - name: Step 1 - Clear Old Logs
+      - name: Ping Database (Daily Check)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          curl --fail --retry 3 --retry-delay 5 --retry-all-errors -sS -i -X DELETE "$SUPABASE_URL/rest/v1/keep_alive_logs?id=gt.0" \
+          echo "Initiating daily keep-alive ping..."
+          
+          # Step 1: Clear old logs
+          DELETE_STATUS=$(curl -o /dev/null -s -w "%{http_code}\n" -X DELETE "$SUPABASE_URL/rest/v1/keep_alive_logs?id=gt.0" \
             -H "apikey: $SUPABASE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_KEY"
-
-      - name: Step 2 - Insert Fresh Ping
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          curl --fail --retry 3 --retry-delay 5 --retry-all-errors -sS -i -X POST "$SUPABASE_URL/rest/v1/keep_alive_logs" \
+            -H "Authorization: Bearer $SUPABASE_KEY")
+            
+          # Step 2: Insert fresh ping
+          INSERT_STATUS=$(curl -o /dev/null -s -w "%{http_code}\n" -X POST "$SUPABASE_URL/rest/v1/keep_alive_logs" \
             -H "apikey: $SUPABASE_KEY" \
             -H "Authorization: Bearer $SUPABASE_KEY" \
             -H "Content-Type: application/json" \
             -H "Prefer: return=minimal" \
-            -d '{"message": "GitHub Action Ping"}'
+            -d '{"message": "GitHub Action Ping"}')
+            
+          # Verify both returned successful HTTP status codes (2xx)
+          if [[ "$DELETE_STATUS" == 2* ]] && [[ "$INSERT_STATUS" == 2* ]]; then
+            echo "✅ Database pinged successfully! (Delete: $DELETE_STATUS, Insert: $INSERT_STATUS)"
+            exit 0
+          else
+            echo "❌ Ping failed. (Delete: $DELETE_STATUS, Insert: $INSERT_STATUS)"
+            echo "Workflow will naturally try again tomorrow."
+            exit 1
+          fi
