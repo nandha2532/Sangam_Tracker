@@ -41,7 +41,7 @@ def render_allocator_grid(df_data, key_name):
     # Enable sorting, resizing, and dragging columns
     gb.configure_default_column(editable=False, sortable=True, resizable=True)
     
-    # ADDED: Enable the right-side tool panel so you can easily hide/show columns!
+    # Enable the right-side tool panel so you can easily hide/show columns!
     gb.configure_side_bar(filters_panel=False, columns_panel=True)
     
     gb.configure_column("master_id", hide=True)
@@ -83,10 +83,13 @@ def render_allocator_grid(df_data, key_name):
     }
     """)
     
-    # FIXED: autoHeight added so the table perfectly wraps the rows without giant grey spaces
-    gb.configure_grid_options(getRowStyle=row_style_alloc, singleClickEdit=True, domLayout='autoHeight')
+    gb.configure_grid_options(getRowStyle=row_style_alloc, singleClickEdit=True)
     
-    grid_resp = AgGrid(df, gridOptions=gb.build(), update_mode=GridUpdateMode.MODEL_CHANGED, data_return_mode=DataReturnMode.AS_INPUT, allow_unsafe_jscode=True, theme="streamlit", key=key_name)
+    # CRITICAL FIX: Dynamically calculate the iframe height based on the number of rows
+    row_count = len(df)
+    dynamic_height = min(500, 110 + (row_count * 35)) # 110px for headers/padding + 35px per row. Max 500px.
+    
+    grid_resp = AgGrid(df, gridOptions=gb.build(), height=dynamic_height, update_mode=GridUpdateMode.MODEL_CHANGED, data_return_mode=DataReturnMode.AS_INPUT, allow_unsafe_jscode=True, theme="streamlit", key=key_name)
     
     return pd.DataFrame(grid_resp['data'])
 
@@ -116,7 +119,7 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
         total_sub_loans_payable = 0.0
         total_sub_loans_receivable = 0.0
         
-        # 1. Direct Loans Calculations (Now with Sub-Loan Breakdowns!)
+        # 1. Direct Loans Calculations
         if not emis_df.empty:
             emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'])
             
@@ -295,11 +298,14 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                 t_paying = t_cash + t_bank
                 t_bal = t_remaining - t_paying
                 
+                # UPDATED: Added all requested fields to the summary bar
                 st.markdown(f"""
-                <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-5px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:20px; font-weight:bold; font-size:13px;'>
-                    <span style='color:#94A3B8;'>TOTAL EXPECTED: ₹{t_expected:,.0f}</span>
+                <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-5px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:15px; font-weight:bold; font-size:12px; flex-wrap:wrap;'>
+                    <span style='color:#94A3B8;'>EXPECTED: ₹{t_expected:,.0f}</span>
                     <span style='color:#94A3B8;'>ALREADY PAID: ₹{t_already:,.0f}</span>
                     <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_remaining:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL CASH: <span style='color:#34D399;'>₹{t_cash:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL BANK: <span style='color:#60A5FA;'>₹{t_bank:,.0f}</span></span>
                     <span style='color:#F8FAFC;'>TOTAL PAID (NOW): <span style='color:#34D399;'>₹{t_paying:,.0f}</span></span>
                     <span style='color:#F8FAFC;'>BALANCE AFTER: <span style='color:#60A5FA;'>₹{t_bal:,.0f}</span></span>
                 </div>
@@ -319,11 +325,14 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                 t_sub_paying = t_sub_cash + t_sub_bank
                 t_sub_bal = t_sub_remaining - t_sub_paying
                 
+                # UPDATED: Added all requested fields to the summary bar
                 st.markdown(f"""
-                <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-5px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:20px; font-weight:bold; font-size:13px;'>
+                <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-5px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:15px; font-weight:bold; font-size:12px; flex-wrap:wrap;'>
                     <span style='color:#94A3B8;'>EXPECTED: ₹{t_sub_expected:,.0f}</span>
-                    <span style='color:#94A3B8;'>PAID: ₹{t_sub_already:,.0f}</span>
+                    <span style='color:#94A3B8;'>ALREADY PAID: ₹{t_sub_already:,.0f}</span>
                     <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_sub_remaining:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL CASH: <span style='color:#34D399;'>₹{t_sub_cash:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL BANK: <span style='color:#60A5FA;'>₹{t_sub_bank:,.0f}</span></span>
                     <span style='color:#F8FAFC;'>TOTAL PAID (NOW): <span style='color:#34D399;'>₹{t_sub_paying:,.0f}</span></span>
                     <span style='color:#F8FAFC;'>BALANCE AFTER: <span style='color:#60A5FA;'>₹{t_sub_bal:,.0f}</span></span>
                 </div>
