@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # ==========================================
 # HELPER: SUB-LOAN CALCULATOR
@@ -29,19 +30,59 @@ def calculate_sub_loan_month(amount_taken, duration_months, start_date_str, targ
     }
 
 # ==========================================
-# ROW STYLING FUNCTIONS
+# AG-GRID RENDERER
 # ==========================================
-def style_payables(row):
-    # Colors row green if it is fully paid
-    if row.get('Remaining Due', 1) <= 0:
-        return ['background-color: #D1E7DD; color: #0F5132; font-weight: bold'] * len(row)
-    return [''] * len(row)
+def render_allocator_grid(df_data, key_name):
+    df = pd.DataFrame(df_data)
+    if df.empty:
+        return pd.DataFrame()
+        
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_default_column(editable=False)
+    gb.configure_column("master_id", hide=True)
+    
+    gb.configure_column("Source", pinned="left", width=220)
+    gb.configure_column("Belongs To", width=140)
+    
+    if "Sub-Loan Details" in df.columns:
+        gb.configure_column("Sub-Loan Details", width=200)
+    
+    # Currency Formatter
+    currency_formatter = JsCode("function(params) { if (params.value == null || params.value === 0) return '₹0'; return '₹' + Number(params.value).toLocaleString('en-IN'); }")
+    
+    for col in ["Expected", "Total Expected", "Sub-Loan Share", "Net Expected", "Already Paid", "Remaining Due"]:
+        if col in df.columns:
+            gb.configure_column(col, type=["numericColumn"], valueFormatter=currency_formatter, width=130)
 
-def style_receivables(row):
-    # Colors row green if it is fully collected
-    if row.get('Remaining to Collect', 1) <= 0:
-        return ['background-color: #D1E7DD; color: #0F5132; font-weight: bold'] * len(row)
-    return [''] * len(row)
+    # Editable Columns
+    gb.configure_column("Cash Paid", editable=True, type=["numericColumn"], valueFormatter=currency_formatter, width=120)
+    gb.configure_column("Bank Paid", editable=True, type=["numericColumn"], valueFormatter=currency_formatter, width=120)
+    
+    # LIVE Calculated Columns 
+    gb.configure_column("Total Paying Now", type=["numericColumn"], width=150,
+                        valueGetter=JsCode("function(params) { return (Number(params.data['Cash Paid']) || 0) + (Number(params.data['Bank Paid']) || 0); }"),
+                        valueFormatter=currency_formatter)
+                        
+    gb.configure_column("Balance After", type=["numericColumn"], width=140,
+                        valueGetter=JsCode("function(params) { return Number(params.data['Remaining Due']) - ((Number(params.data['Cash Paid']) || 0) + (Number(params.data['Bank Paid']) || 0)); }"),
+                        valueFormatter=currency_formatter)
+
+    # Dynamic Green Row Styling
+    row_style_alloc = JsCode("""
+    function(params) {
+        let rem = Number(params.data['Remaining Due']) - ((Number(params.data['Cash Paid']) || 0) + (Number(params.data['Bank Paid']) || 0));
+        if (rem <= 0) {
+            return {'backgroundColor': '#D1E7DD', 'color': '#0F5132', 'fontWeight': 'bold'};
+        }
+        return null;
+    }
+    """)
+    
+    gb.configure_grid_options(getRowStyle=row_style_alloc, singleClickEdit=True)
+    
+    grid_resp = AgGrid(df, gridOptions=gb.build(), update_mode=GridUpdateMode.MODEL_CHANGED, data_return_mode=DataReturnMode.AS_INPUT, allow_unsafe_jscode=True, theme="streamlit", key=key_name)
+    
+    return pd.DataFrame(grid_resp['data'])
 
 # ==========================================
 # UI COMPONENT: SETTLEMENT ALLOCATOR
@@ -57,7 +98,6 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
     )
     
     if settlement_members:
-        # Checkbox to toggle Paid Loans
         hide_paid_settlements_local = st.checkbox("Hide fully paid loans (Check to view only pending)", value=hide_paid_settlements, key="hide_paid_settle")
         
         settle_ids = [member_dict[n] for n in settlement_members]
@@ -70,7 +110,7 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
         total_sub_loans_payable = 0.0
         total_sub_loans_receivable = 0.0
         
-        # 1. Direct Loans Calculations
+        # 1. Direct Loans Calculations (Now with Sub-Loan Breakdowns!)
         if not emis_df.empty:
             emis_df['pay_date'] = pd.to_datetime(emis_df['pay_date'])
             
@@ -89,6 +129,8 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                     
                     if is_current or is_overdue:
                         exact_ticket_name = id_to_name.get(row_member_id, 'Unknown')
+                        loan_id = row.get('loan_id')
+                        emi_num = row.get('emi_number')
                         
                         exp = float(row['total_expected']) if pd.notna(row.get('total_expected')) else 0.0
                         p_c = float(row['paid_cash']) if pd.notna(row.get('paid_cash')) else 0.0
@@ -100,16 +142,36 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                         if hide_paid_settlements_local and remaining <= 0:
                             continue
                             
+                        # Search for sub-loans carrying the weight of this EMI
+                        sub_share_total = 0.0
+                        sub_details = []
+                        if not settlements_df.empty and loan_id and not loans_df.empty:
+                            my_splits = settlements_df[settlements_df['master_loan_id'] == loan_id]
+                            master_loan_row = loans_df[loans_df['id'] == loan_id]
+                            if not master_loan_row.empty:
+                                m_row = master_loan_row.iloc[0]
+                                for _, split in my_splits.iterrows():
+                                    sub_name = id_to_name.get(split['sub_borrower_id'], 'Unknown')
+                                    calc = calculate_sub_loan_month(float(split['amount_taken']), int(m_row['duration_months']), m_row['created_at'], target_date_obj)
+                                    if calc and calc['emi_number'] == emi_num:
+                                        sub_share_total += float(calc['total_due'])
+                                        sub_details.append(f"{sub_name} (₹{calc['total_due']:,.0f})")
+                                        
+                        sub_detail_str = " + ".join(sub_details) if sub_details else "-"
+                        
                         total_direct_liability += remaining
                         direct_payables_data.append({
                             "master_id": row_member_id,
-                            "Source": f"Direct Loan #{row.get('loan_id', '?')} (EMI #{row.get('emi_number', '?')})",
+                            "Source": f"Direct Loan #{loan_id} (EMI #{emi_num})",
                             "Belongs To": exact_ticket_name,
-                            "Expected": exp,
+                            "Total Expected": exp,
+                            "Sub-Loan Share": sub_share_total,
+                            "Sub-Loan Details": sub_detail_str,
+                            "Net Expected": exp - sub_share_total,
                             "Already Paid": already_paid,
                             "Remaining Due": remaining,
-                            "Cash Paid (₹)": 0.0,
-                            "Bank Paid (₹)": 0.0
+                            "Cash Paid": 0.0,
+                            "Bank Paid": 0.0
                         })
                 
         # 2. Sub-Loans Taken Calculations
@@ -151,8 +213,8 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                         "Expected": total_due,
                         "Already Paid": already_paid,
                         "Remaining Due": remaining,
-                        "Cash Paid (₹)": 0.0,
-                        "Bank Paid (₹)": 0.0
+                        "Cash Paid": 0.0,
+                        "Bank Paid": 0.0
                     })
                     
         # 3. Sub-Loans Given (Receivables)
@@ -213,77 +275,58 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
         edited_direct = pd.DataFrame()
         edited_sub = pd.DataFrame()
         
-        # --- DIRECT LOANS TABLE ---
+        # --- DIRECT LOANS TABLE (AG-GRID) ---
         if direct_payables_data:
             st.write("**🔴 Direct Loans Owed**")
-            df_direct = pd.DataFrame(direct_payables_data)
-            edited_direct = st.data_editor(
-                df_direct.style.apply(style_payables, axis=1),
-                column_config={
-                    "master_id": None, 
-                    "Expected": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
-                    "Already Paid": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
-                    "Remaining Due": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
-                    "Source": st.column_config.TextColumn(disabled=True),
-                    "Belongs To": st.column_config.TextColumn(disabled=True),
-                    "Cash Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0),
-                    "Bank Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0)
-                },
-                hide_index=True, use_container_width=True, key=f"alloc_dir_{st.session_state['form_reset_key']}"
-            )
-            t_expected = edited_direct['Expected'].sum()
-            t_already = edited_direct['Already Paid'].sum()
-            t_remaining = edited_direct['Remaining Due'].sum()
-            t_cash = edited_direct['Cash Paid (₹)'].sum()
-            t_bank = edited_direct['Bank Paid (₹)'].sum()
-            st.markdown(f"""
-            <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-15px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:30px; font-weight:bold; font-size:14px;'>
-                <span style='color:#94A3B8;'>EXPECTED: ₹{t_expected:,.0f}</span>
-                <span style='color:#94A3B8;'>PAID: ₹{t_already:,.0f}</span>
-                <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_remaining:,.0f}</span></span>
-                <span style='color:#F8FAFC;'>TOTAL CASH: <span style='color:#34D399;'>₹{t_cash:,.0f}</span></span>
-                <span style='color:#F8FAFC;'>TOTAL BANK: <span style='color:#60A5FA;'>₹{t_bank:,.0f}</span></span>
-            </div>
-            """, unsafe_allow_html=True)
+            edited_direct = render_allocator_grid(direct_payables_data, f"alloc_dir_{st.session_state['form_reset_key']}")
+            
+            if not edited_direct.empty:
+                t_expected = pd.to_numeric(edited_direct['Total Expected'], errors='coerce').fillna(0).sum()
+                t_already = pd.to_numeric(edited_direct['Already Paid'], errors='coerce').fillna(0).sum()
+                t_remaining = pd.to_numeric(edited_direct['Remaining Due'], errors='coerce').fillna(0).sum()
+                t_cash = pd.to_numeric(edited_direct['Cash Paid'], errors='coerce').fillna(0).sum()
+                t_bank = pd.to_numeric(edited_direct['Bank Paid'], errors='coerce').fillna(0).sum()
+                t_paying = t_cash + t_bank
+                t_bal = t_remaining - t_paying
+                
+                st.markdown(f"""
+                <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-5px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:20px; font-weight:bold; font-size:13px;'>
+                    <span style='color:#94A3B8;'>TOTAL EXPECTED: ₹{t_expected:,.0f}</span>
+                    <span style='color:#94A3B8;'>ALREADY PAID: ₹{t_already:,.0f}</span>
+                    <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_remaining:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL PAYING NOW: <span style='color:#34D399;'>₹{t_paying:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>BALANCE AFTER: <span style='color:#60A5FA;'>₹{t_bal:,.0f}</span></span>
+                </div>
+                """, unsafe_allow_html=True)
 
-        # --- SUB LOANS TABLE ---
+        # --- SUB LOANS TABLE (AG-GRID) ---
         if subloan_payables_data:
             st.write("**🟠 Sub-Loans Owed to Others**")
-            df_sub = pd.DataFrame(subloan_payables_data)
-            edited_sub = st.data_editor(
-                df_sub.style.apply(style_payables, axis=1),
-                column_config={
-                    "master_id": None, 
-                    "Expected": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
-                    "Already Paid": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
-                    "Remaining Due": st.column_config.NumberColumn(format="₹%.0f", disabled=True),
-                    "Source": st.column_config.TextColumn(disabled=True),
-                    "Belongs To": st.column_config.TextColumn(disabled=True),
-                    "Cash Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0),
-                    "Bank Paid (₹)": st.column_config.NumberColumn(min_value=0.0, step=100.0)
-                },
-                hide_index=True, use_container_width=True, key=f"alloc_sub_{st.session_state['form_reset_key']}"
-            )
-            t_sub_expected = edited_sub['Expected'].sum()
-            t_sub_already = edited_sub['Already Paid'].sum()
-            t_sub_remaining = edited_sub['Remaining Due'].sum()
-            t_sub_cash = edited_sub['Cash Paid (₹)'].sum()
-            t_sub_bank = edited_sub['Bank Paid (₹)'].sum()
-            st.markdown(f"""
-            <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-15px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:30px; font-weight:bold; font-size:14px;'>
-                <span style='color:#94A3B8;'>EXPECTED: ₹{t_sub_expected:,.0f}</span>
-                <span style='color:#94A3B8;'>PAID: ₹{t_sub_already:,.0f}</span>
-                <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_sub_remaining:,.0f}</span></span>
-                <span style='color:#F8FAFC;'>TOTAL CASH: <span style='color:#34D399;'>₹{t_sub_cash:,.0f}</span></span>
-                <span style='color:#F8FAFC;'>TOTAL BANK: <span style='color:#60A5FA;'>₹{t_sub_bank:,.0f}</span></span>
-            </div>
-            """, unsafe_allow_html=True)
+            edited_sub = render_allocator_grid(subloan_payables_data, f"alloc_sub_{st.session_state['form_reset_key']}")
+            
+            if not edited_sub.empty:
+                t_sub_expected = pd.to_numeric(edited_sub['Expected'], errors='coerce').fillna(0).sum()
+                t_sub_already = pd.to_numeric(edited_sub['Already Paid'], errors='coerce').fillna(0).sum()
+                t_sub_remaining = pd.to_numeric(edited_sub['Remaining Due'], errors='coerce').fillna(0).sum()
+                t_sub_cash = pd.to_numeric(edited_sub['Cash Paid'], errors='coerce').fillna(0).sum()
+                t_sub_bank = pd.to_numeric(edited_sub['Bank Paid'], errors='coerce').fillna(0).sum()
+                t_sub_paying = t_sub_cash + t_sub_bank
+                t_sub_bal = t_sub_remaining - t_sub_paying
+                
+                st.markdown(f"""
+                <div style='background-color:#1E293B; padding:10px; border-radius:5px; margin-top:-5px; margin-bottom:20px; display:flex; justify-content:flex-end; gap:20px; font-weight:bold; font-size:13px;'>
+                    <span style='color:#94A3B8;'>EXPECTED: ₹{t_sub_expected:,.0f}</span>
+                    <span style='color:#94A3B8;'>PAID: ₹{t_sub_already:,.0f}</span>
+                    <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_sub_remaining:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL PAYING NOW: <span style='color:#34D399;'>₹{t_sub_paying:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>BALANCE AFTER: <span style='color:#60A5FA;'>₹{t_sub_bal:,.0f}</span></span>
+                </div>
+                """, unsafe_allow_html=True)
             
         if receivables_data:
             st.write("**🟢 Sub-Loans to Collect** (Read-Only)")
-            df_rec = pd.DataFrame(receivables_data)
             st.dataframe(
-                df_rec.style.apply(style_receivables, axis=1),
+                pd.DataFrame(receivables_data),
                 column_config={
                     "Expected": st.column_config.NumberColumn(format="₹%.0f"),
                     "Already Collected": st.column_config.NumberColumn(format="₹%.0f"),
@@ -300,8 +343,8 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                 def process_allocated_funds(df):
                     nonlocal staged_any
                     for _, row in df.iterrows():
-                        c_amt = float(row.get('Cash Paid (₹)', 0.0) or 0.0)
-                        b_amt = float(row.get('Bank Paid (₹)', 0.0) or 0.0)
+                        c_amt = float(row.get('Cash Paid', 0.0) or 0.0)
+                        b_amt = float(row.get('Bank Paid', 0.0) or 0.0)
                         if c_amt > 0 or b_amt > 0:
                             m_id = int(row['master_id'])
                             if m_id not in st.session_state['prefill_emi']:
@@ -318,4 +361,4 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                     st.toast("✅ Funds successfully staged to the EMI table!", icon="⬇️")
                     st.rerun()
                 else:
-                    st.warning("Please enter at least one amount greater than 0 in the tables above.")  
+                    st.warning("Please enter at least one amount greater than 0 in the tables above.")

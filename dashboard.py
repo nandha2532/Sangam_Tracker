@@ -273,7 +273,7 @@ def render_dashboard(members_df, member_dict, global_target_date):
                 
                 # Find all unpaid EMIs specifically for this loan
                 unpaid_emis_for_loan = pending_emis[pending_emis['loan_id'] == l_id]
-                unpaid_count = len(unpaid_emis_for_loan)
+                unpaid_count = len(unpaid_emis_for_loan)    
                 
                 # Base outstanding principal is (remaining months * principal per month)
                 loan_outstanding_principal = (principal_per_month * unpaid_count)
