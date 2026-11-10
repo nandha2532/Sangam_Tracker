@@ -38,7 +38,12 @@ def render_allocator_grid(df_data, key_name):
         return pd.DataFrame()
         
     gb = GridOptionsBuilder.from_dataframe(df)
-    gb.configure_default_column(editable=False)
+    # Enable sorting, resizing, and dragging columns
+    gb.configure_default_column(editable=False, sortable=True, resizable=True)
+    
+    # ADDED: Enable the right-side tool panel so you can easily hide/show columns!
+    gb.configure_side_bar(filters_panel=False, columns_panel=True)
+    
     gb.configure_column("master_id", hide=True)
     
     gb.configure_column("Source", pinned="left", width=220)
@@ -58,8 +63,8 @@ def render_allocator_grid(df_data, key_name):
     gb.configure_column("Cash Paid", editable=True, type=["numericColumn"], valueFormatter=currency_formatter, width=120)
     gb.configure_column("Bank Paid", editable=True, type=["numericColumn"], valueFormatter=currency_formatter, width=120)
     
-    # LIVE Calculated Columns 
-    gb.configure_column("Total Paying Now", type=["numericColumn"], width=150,
+    # LIVE Calculated Columns (Sums Cash + Bank instantly)
+    gb.configure_column("Total Paid (Now)", type=["numericColumn"], width=150,
                         valueGetter=JsCode("function(params) { return (Number(params.data['Cash Paid']) || 0) + (Number(params.data['Bank Paid']) || 0); }"),
                         valueFormatter=currency_formatter)
                         
@@ -78,7 +83,8 @@ def render_allocator_grid(df_data, key_name):
     }
     """)
     
-    gb.configure_grid_options(getRowStyle=row_style_alloc, singleClickEdit=True)
+    # FIXED: autoHeight added so the table perfectly wraps the rows without giant grey spaces
+    gb.configure_grid_options(getRowStyle=row_style_alloc, singleClickEdit=True, domLayout='autoHeight')
     
     grid_resp = AgGrid(df, gridOptions=gb.build(), update_mode=GridUpdateMode.MODEL_CHANGED, data_return_mode=DataReturnMode.AS_INPUT, allow_unsafe_jscode=True, theme="streamlit", key=key_name)
     
@@ -294,7 +300,7 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                     <span style='color:#94A3B8;'>TOTAL EXPECTED: ₹{t_expected:,.0f}</span>
                     <span style='color:#94A3B8;'>ALREADY PAID: ₹{t_already:,.0f}</span>
                     <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_remaining:,.0f}</span></span>
-                    <span style='color:#F8FAFC;'>TOTAL PAYING NOW: <span style='color:#34D399;'>₹{t_paying:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL PAID (NOW): <span style='color:#34D399;'>₹{t_paying:,.0f}</span></span>
                     <span style='color:#F8FAFC;'>BALANCE AFTER: <span style='color:#60A5FA;'>₹{t_bal:,.0f}</span></span>
                 </div>
                 """, unsafe_allow_html=True)
@@ -318,7 +324,7 @@ def render_individual_settlement(member_dict, target_year, target_month, target_
                     <span style='color:#94A3B8;'>EXPECTED: ₹{t_sub_expected:,.0f}</span>
                     <span style='color:#94A3B8;'>PAID: ₹{t_sub_already:,.0f}</span>
                     <span style='color:#F8FAFC;'>REMAINING DUE: <span style='color:#FCD34D;'>₹{t_sub_remaining:,.0f}</span></span>
-                    <span style='color:#F8FAFC;'>TOTAL PAYING NOW: <span style='color:#34D399;'>₹{t_sub_paying:,.0f}</span></span>
+                    <span style='color:#F8FAFC;'>TOTAL PAID (NOW): <span style='color:#34D399;'>₹{t_sub_paying:,.0f}</span></span>
                     <span style='color:#F8FAFC;'>BALANCE AFTER: <span style='color:#60A5FA;'>₹{t_sub_bal:,.0f}</span></span>
                 </div>
                 """, unsafe_allow_html=True)
